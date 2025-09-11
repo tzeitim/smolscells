@@ -1,0 +1,95 @@
+# Small-scale simulation configuration - NO PLOTTING
+# Useful for quick testing and debugging without plot generation overhead
+
+# Tree generation parameters
+tree:
+  # Smaller tree for faster simulation
+  original_cells:  1000
+  sampled_cells:   1000  # 98% of original cells
+  
+  fitness:
+    initial_birth_scale: 2
+    mutation_probability: 0.5
+    fitness_mean: 0.5
+    fitness_std: 0.75
+    fitness_base: 1.1
+    
+# Cassette parameters - reduced for testing
+cassette:
+  num_intbc: 4  # Fewer integration barcodes
+  sites_per_intbc: 10  # Fewer edit sites
+  num_states: 100  # Fewer mutation states
+  mutation_start_rate: 1.5  # Much higher mutation rate to ensure signal
+  mutation_end_rate: 0.5   # Higher rate for downstream sites
+  mutation_pattern: "exponential_decay"  # Progressive accumulation pattern
+  intbc_start_scale: 1.0  # First intbc has highest rates
+  intbc_end_scale: 0.6    # Later intbcs have lower rates  
+  intbc_scale_pattern: "exponential_decay"  # Exponential decrease across intbcs
+  state_priors_exp: 0.001  # Higher prior weight
+
+# Proper subsampling rates for testing
+sampling:
+  single_molecule_rate: 0.5  # 50% of cells for bulk sequencing
+  single_cell_rate: 0.12      # 20% of cells for single-cell
+
+# Dropout simulation for single-cell data
+dropout:
+  enabled: true
+  rate: 0.20  # 15% dropout rate (typical for single-cell)
+  pattern: "per_intbc"  # Options: "uniform", "per_intbc", "per_cell"
+  # Additional parameters for specific patterns:
+  intbc_variability: 0.0  # For per_intbc: ±10% variation in dropout rates
+  cell_variability: 0.01   # For per_cell: up to +20% higher dropout for low-quality cells
+
+# Solver parameters
+solver:
+  primary: "neighbor_joining"
+  fallback: "upgma"
+  add_root: true
+
+# Output parameters - PLOTTING DISABLED
+output:
+  plot_dir: "poster/"
+  results_dir: "poster/"
+  save_intermediate: false  # Disable intermediate file saving
+  save_trees: true  # Keep tree saving enabled for analysis
+  
+  plot:
+    polar: true  # DISABLED
+    linear: true  # DISABLED - no plotting
+    show_legend: false
+    collapse_mutationless: true
+    linear_figsize: [5, 10]
+    polar_figsize: [5, 5]
+    dpi: 200
+    save_svg: true  # Enable SVG output
+    final_cut: false  # Set to true to hide titles and intbc column names
+    
+    # Dynamic plot scaling based on tree size (disabled)
+    pixels_per_cell: 0.08
+    min_plot_height: 8
+    max_plot_height: 50
+    max_plot_width: 20
+    
+    # Branch coloring for hierarchical sampling visualization (disabled)
+    colors:
+      cas9_sampling: "#000000"
+      bulk_sampling: "#1f77b4"
+      single_cell_sampling: "#d62728"
+      unsampled: "#7f7f7f"
+      base_tree: "#7f7f7f"
+    
+    # Line widths for different sampling levels (disabled)
+    linewidths:
+      cas9_sampling: 1.5
+      bulk_sampling: 1.5
+      single_cell_sampling: 1.5
+      unsampled: 1.0
+      base_tree: 1.0
+      individual_emphasis: 2.0
+
+# Random seed for reproducibility
+random_seed: 12345
+
+# Lower verbosity for faster execution
+verbosity: 0

@@ -1,0 +1,62 @@
+# SmolScells Default Configuration
+# Standard parameters for typical simulation
+
+# Tree generation parameters
+tree:
+  original_cells: 10000    # Number of cells in original tree
+  sampled_cells: 1000      # Number of cells after Cas9 recording
+  
+  fitness:
+    initial_birth_scale: 2.0
+    mutation_probability: 0.5
+    fitness_mean: 0.5
+    fitness_std: 0.25
+    fitness_base: 1.1
+
+# Cassette parameters
+cassette:
+  num_intbc: 4             # Number of integration barcodes
+  sites_per_intbc: 10      # Edit sites per integration barcode  
+  num_states: 50           # Number of possible mutation states
+  mutation_start_rate: 0.5
+  mutation_end_rate: 0.05
+  mutation_pattern: "exponential_decay"
+  intbc_start_scale: 1.0
+  intbc_end_scale: 1.0
+  intbc_scale_pattern: "uniform"
+  state_priors_exp: 1.0e-5
+
+# Sampling parameters
+sampling:
+  single_molecule_rate: 0.5  # Fraction for bulk sequencing
+  single_cell_rate: 0.2      # Fraction for single-cell sequencing
+
+# Dropout simulation
+dropout:
+  enabled: true
+  rate: 0.15
+  pattern: "uniform"  # Options: uniform, per_intbc, per_cell
+  intbc_variability: 0.1
+  cell_variability: 0.2
+
+# Solver parameters
+solver:
+  primary: "neighbor_joining"
+  fallback: "upgma"
+  add_root: true
+
+# Output parameters
+output:
+  plot_dir: "plots"
+  results_dir: "results"
+  save_intermediate: true
+  save_trees: true
+  
+  plot:
+    collapse_mutationless: true
+
+# Random seed for reproducibility
+random_seed: 42
+
+# Verbosity level (0=quiet, 1=normal, 2=verbose)
+verbosity: 1

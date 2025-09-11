@@ -1,0 +1,62 @@
+# SmolScells Large-Scale Configuration
+# Parameters for large-scale simulations
+
+# Tree generation parameters
+tree:
+  original_cells: 100000   # Large initial population
+  sampled_cells: 10000     # 10% sampling for Cas9 recording
+  
+  fitness:
+    initial_birth_scale: 2.0
+    mutation_probability: 0.3  # Lower mutation rate for stability
+    fitness_mean: 0.3
+    fitness_std: 0.15
+    fitness_base: 1.05
+
+# Cassette parameters
+cassette:
+  num_intbc: 8             # More integration barcodes
+  sites_per_intbc: 20      # More edit sites per intbc
+  num_states: 100          # More mutation states
+  mutation_start_rate: 0.3
+  mutation_end_rate: 0.01
+  mutation_pattern: "exponential_decay"
+  intbc_start_scale: 1.0
+  intbc_end_scale: 0.5
+  intbc_scale_pattern: "exponential_decay"
+  state_priors_exp: 1.0e-6
+
+# Sampling parameters
+sampling:
+  single_molecule_rate: 0.4  # 40% bulk sampling
+  single_cell_rate: 0.1      # 10% single-cell (realistic)
+
+# Dropout simulation
+dropout:
+  enabled: true
+  rate: 0.20  # Higher dropout for large-scale
+  pattern: "per_intbc"  # More realistic pattern
+  intbc_variability: 0.15
+  cell_variability: 0.25
+
+# Solver parameters
+solver:
+  primary: "neighbor_joining"
+  fallback: "upgma"
+  add_root: true
+
+# Output parameters
+output:
+  plot_dir: "plots_large"
+  results_dir: "results_large"
+  save_intermediate: false  # Reduce I/O for large scale
+  save_trees: true
+  
+  plot:
+    collapse_mutationless: true
+
+# Random seed for reproducibility
+random_seed: 12345
+
+# Verbosity level
+verbosity: 1

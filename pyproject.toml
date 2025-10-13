@@ -56,7 +56,7 @@ Repository = "https://github.com/tzeitim/smolscells"
 Issues = "https://github.com/tzeitim/smolscells/issues"
 
 [tool.setuptools]
-packages = ["smolscells", "smolscells.core", "smolscells.config", "smolscells.analysis", "smolscells.visualization"]
+packages = ["smolscells"]
 
 [tool.setuptools.package-data]
 smolscells = ["configs/*.yaml"]

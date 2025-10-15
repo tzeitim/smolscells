@@ -1,197 +1,435 @@
-from cassiopeia.data import CassiopeiaTree
-from cassiopeia.mixins import CassiopeiaTreeError
-from cassiopeia.simulator import Cas9LineageTracingDataSimulator, BirthDeathFitnessSimulator
-import numpy as np
-from convexml import convexml
+"""
+SimulatedLineageForest - Simulation workflow for lineage tracing experiments.
+
+This module provides a dedicated class for simulating lineage tracing data,
+keeping simulation concerns separate from the observational LineageForest class.
+"""
+
+from __future__ import annotations
+
+from typing import Any
 from pathlib import Path
 import logging
 
-from .sampling import mutually_exclusive_sampling, split_single_molecule_data, apply_single_cell_dropout, compute_single_cell_dropout
+import numpy as np
+import pandas as pd
+from cassiopeia.data import CassiopeiaTree
+from cassiopeia.simulator import Cas9LineageTracingDataSimulator, BirthDeathFitnessSimulator
+
+from .lineage_treedata import LineageForest
+from .sampling import (
+    mutually_exclusive_sampling,
+    split_single_molecule_data,
+    apply_single_cell_dropout,
+    compute_single_cell_dropout,
+)
 from . import solvers
 
 logger = logging.getLogger(__name__)
 
+# ═══════════════════════════════════════════════════════════
+# DEFAULT CONFIGURATIONS
+# ═══════════════════════════════════════════════════════════
+
+
 def _birth_waiting_distribution(scale):
     """Default birth waiting distribution for ground truth simulation."""
-    return np.random.exponential(1/scale)
+    return np.random.exponential(1 / scale)
+
 
 def _state_generating_distribution():
     """Default state generating distribution for experimental simulation."""
     return np.random.exponential(1e-5)
 
+
 def return_default_conf_gt():
+    """Return default ground truth simulation configuration."""
     return {
-        'birth_waiting_distribution': _birth_waiting_distribution,
-        'initial_birth_scale': 2,
-        'num_extant': 1000
+        "birth_waiting_distribution": _birth_waiting_distribution,
+        "initial_birth_scale": 2,
+        "num_extant": 1000,
     }
 
-def return_defalt_conf_exp(missing_data=False):
+
+def return_default_conf_exp(missing_data=False):
+    """Return default experimental recording configuration."""
     return {
-        'number_of_cassettes': 4,
-        'size_of_cassette': 10,
-        'mutation_rate': 0.1,
-        'state_generating_distribution': _state_generating_distribution,
-        'number_of_states': 50,
-        'state_priors': None,
-        'heritable_silencing_rate': 0, #9e-4 if missing_data else 0,
-        'stochastic_silencing_rate': 0, #0.1 if missing_data else 0,
-        'heritable_missing_data_state': -1,
-        'stochastic_missing_data_state': -1,
+        "number_of_cassettes": 4,
+        "size_of_cassette": 10,
+        "mutation_rate": 0.1,
+        "state_generating_distribution": _state_generating_distribution,
+        "number_of_states": 50,
+        "state_priors": None,
+        "heritable_silencing_rate": 0,
+        "stochastic_silencing_rate": 0,
+        "heritable_missing_data_state": -1,
+        "stochastic_missing_data_state": -1,
     }
+
 
 def return_default_conf_dropout(missing_data=False):
-    #pattern == 'uniform':'per_intbc': 'per_cell'
+    """Return default dropout configuration."""
     return {
-            'enabled': missing_data,
-            'pattern': 'per_intbc',
-            'intbc_variability': 0.1,
-            'cell_variability': 0.2,
-            }
+        "enabled": missing_data,
+        "pattern": "per_intbc",
+        "intbc_variability": 0.1,
+        "cell_variability": 0.2,
+    }
+
+
 def return_default_conf_solver():
-    return solvers.get_solver_class('nj')
-        
-#
-#solver = cas.solver.NeighborJoiningSolver(
-#    dissimilarity_function=cas.solver.dissimilarity.weighted_hamming_distance,
-#    add_root=True
-#    )
+    """Return default solver."""
+    return solvers.get_solver_class("nj")
 
-#solver.solve(exp_tree, collapse_mutationless_edges=True)
 
-class Simsmolscells():
-    conf_gt:None|dict
-    conf_exp:None|dict
-    gt_tree:None|CassiopeiaTree=None
-    sm_trees:dict={}
+# ═══════════════════════════════════════════════════════════
+# SIMULATED LINEAGE FOREST
+# ═══════════════════════════════════════════════════════════
 
-    def __init__(self, conf_gt:Path|dict|None=None, 
-                 conf_xp:Path|dict|None=None, 
-                 conf_dropout:Path|dict|None=None,  
-                 conf_solver:Path|dict|None=None,  
-                 missing_data=False):
-        if conf_gt is None:
-            self.conf_gt = return_default_conf_gt()
+class SimulatedLineageForest:
+    """
+    Complete simulation workflow and data container for lineage tracing.
 
-        if conf_xp is None:
-            self.conf_exp = return_defalt_conf_exp(missing_data)
+    Separates simulation concerns (ground truth, experimental artifacts) from
+    observational data (LineageForest). Contains all simulation metadata and
+    populates a LineageForest instance with observational layer data.
 
-        if conf_dropout is None:
-            self.conf_dropout = return_default_conf_dropout(missing_data)
+    Attributes
+    ----------
+    conf_gt : dict
+        Ground truth simulation configuration
+    conf_exp : dict
+        Experimental recording configuration
+    conf_dropout : dict
+        Dropout configuration
+    gt_tree : CassiopeiaTree | None
+        Ground truth tree
+    exp_tree : CassiopeiaTree | None
+        Experimental tree with character matrix
+    sc_matrix : pd.DataFrame | None
+        Single-cell character matrix (pre-dropout)
+    sc_matrix_masked : pd.DataFrame | None
+        Single-cell character matrix (post-dropout)
+    sc_matrix_mask : pd.DataFrame | None
+        Dropout mask for single-cell data
+    sm_matrix : pd.DataFrame | None
+        Single-molecule character matrix
+    sc_cell_ids : list | None
+        Cell IDs in single-cell fraction
+    sm_cell_ids : list | None
+        Cell IDs in single-molecule fraction
+    sm_mats : dict | None
+        Single-molecule matrices by intBC
+    lineage_forest : LineageForest
+        Observational data (solved trees)
+    solver : Any
+        Cassiopeia solver instance
 
-        if conf_solver is None:
-            self.solver = return_default_conf_solver()
-        
-    def simulate_gt(self):
+    Examples
+    --------
+    >>> # Create simulation
+    >>> sim = SimulatedLineageForest()
+    >>> sim.simulate(sc_rate=0.1, sm_rate=0.5)
+    >>>
+    >>> # Access observational data
+    >>> lf = sim.lineage_forest
+    >>> lf.plot_tree(tree='sc')
+    >>>
+    >>> # Compare to ground truth
+    >>> print(sim.gt_tree)
+    """
+
+    def __init__(
+        self,
+        conf_gt: Path | dict | None = None,
+        conf_exp: Path | dict | None = None,
+        conf_dropout: Path | dict | None = None,
+        conf_solver: Path | dict | None = None,
+        missing_data: bool = False,
+    ):
+        """
+        Initialize SimulatedLineageForest.
+
+        Parameters
+        ----------
+        conf_gt
+            Ground truth simulation config
+        conf_exp
+            Experimental recording config
+        conf_dropout
+            Dropout config
+        conf_solver
+            Solver config
+        missing_data
+            Whether to enable missing data in default configs
+        """
+        # Configuration
+        self.conf_gt = conf_gt if conf_gt is not None else return_default_conf_gt()
+        self.conf_exp = conf_exp if conf_exp is not None else return_default_conf_exp(missing_data)
+        self.conf_dropout = (
+            conf_dropout if conf_dropout is not None else return_default_conf_dropout(missing_data)
+        )
+        self.solver = conf_solver if conf_solver is not None else return_default_conf_solver()
+
+        # Ground truth
+        self.gt_tree: CassiopeiaTree | None = None
+        self.exp_tree: CassiopeiaTree | None = None
+
+        # Sampling artifacts
+        self.sc_matrix: pd.DataFrame | None = None
+        self.sc_matrix_masked: pd.DataFrame | None = None
+        self.sc_matrix_mask: pd.DataFrame | None = None
+        self.sm_matrix: pd.DataFrame | None = None
+        self.sc_cell_ids: list | None = None
+        self.sm_cell_ids: list | None = None
+        self.sm_mats: dict | None = None
+
+        # Observational data container
+        self.lineage_forest = LineageForest(alignment="subset")
+
+        # CassiopeiaTree objects for solving
+        self._sc_tree: CassiopeiaTree | None = None
+        self._sm_trees: dict[str, CassiopeiaTree] = {}
+
+    def simulate_gt(self) -> None:
+        """Simulate ground truth tree."""
         if self.gt_tree is None:
             simulator = BirthDeathFitnessSimulator(**self.conf_gt)
             self.gt_tree = simulator.simulate_tree()
-            logger.info("Simulated GT Tree")
+            logger.info(f"Simulated GT tree with {self.gt_tree.n_cell} cells")
         else:
             logger.warning("GT tree already exists")
 
-    def simulate_recording(self):
+    def simulate_recording(self) -> None:
+        """Simulate lineage recording on ground truth."""
+        if self.gt_tree is None:
+            raise ValueError("Must simulate ground truth first (call simulate_gt)")
+
         exp_simulator = Cas9LineageTracingDataSimulator(**self.conf_exp)
         exp_simulator.overlay_data(self.gt_tree)
 
         self.exp_tree = CassiopeiaTree(
-                character_matrix = self.gt_tree.character_matrix, 
-                missing_state_indicator = -1)
+            character_matrix=self.gt_tree.character_matrix, missing_state_indicator=-1
+        )
+        logger.info("Simulated lineage recording")
 
 
-    def sample_fractions(self, sc_rate=0.1, sm_rate=0.5):
-        """ samples bulk and single-cell fractions from the GT tree 
+    def sample_fractions(self, sc_rate: float = 0.1, sm_rate: float = 0.5) -> None:
         """
+        Sample single-cell and single-molecule fractions.
+
+        Parameters
+        ----------
+        sc_rate
+            Fraction of cells to sample for single-cell
+        sm_rate
+            Fraction of cells to sample for single-molecule
+        """
+        if self.exp_tree is None:
+            raise ValueError("Must simulate recording first (call simulate_recording)")
+
+        # Sample from experimental tree
         sc_matrix, sm_matrix, sc_cell_ids, sm_cell_ids = mutually_exclusive_sampling(
-                character_matrix= self.exp_tree.character_matrix,
-                sc_rate=sc_rate, 
-                sm_rate=sm_rate
-                ) 
+            character_matrix=self.exp_tree.character_matrix,
+            sc_rate=sc_rate,
+            sm_rate=sm_rate,
+        )
+
         self.sc_matrix = sc_matrix
         self.sm_matrix = sm_matrix
         self.sc_cell_ids = sc_cell_ids
         self.sm_cell_ids = sm_cell_ids
 
-
-        # populate single molecule objects
+        # Split single-molecule data by intBC
         self.sm_mats = split_single_molecule_data(
-                character_matrix=self.sm_matrix,
-                sm_cell_ids=self.sm_cell_ids,
-                **self.conf_exp)
-       
+            character_matrix=self.sm_matrix, sm_cell_ids=self.sm_cell_ids, **self.conf_exp
+        )
 
-        for k,v in self.sm_mats.items():
-            self.sm_trees[k] = CassiopeiaTree(character_matrix=v) 
-        logger.info(f"Created single-molecule trees {len(self.sm_trees)} total")
+        # Create CassiopeiaTree objects for single-molecule data
+        for k, v in self.sm_mats.items():
+            self._sm_trees[k] = CassiopeiaTree(character_matrix=v)
+        logger.info(f"Created {len(self._sm_trees)} single-molecule trees")
 
-        # compute dropout stats
-        cmultipliers, intdbrates =  compute_single_cell_dropout(character_matrix=self.sc_matrix, dropout_config={})
+        # Compute dropout stats
+        cmultipliers, intdbrates = compute_single_cell_dropout(
+            character_matrix=self.sc_matrix, dropout_config=self.conf_dropout
+        )
 
-        # populate single cell objects
+        # Apply dropout to single-cell data
         self.sc_matrix_masked, self.sc_matrix_mask = apply_single_cell_dropout(
             character_matrix=self.sc_matrix,
-            cell_multipliers=cmultipliers, 
+            cell_multipliers=cmultipliers,
             intbc_dropout_rates=intdbrates,
-            sites_per_intbc=self.conf_exp["size_of_cassette"]
-            )
+            sites_per_intbc=self.conf_exp["size_of_cassette"],
+        )
 
-        self.sc_tree = CassiopeiaTree(character_matrix=self.sc_matrix_masked)
-        logger.info("Created single-cell tree")
+        # Create CassiopeiaTree object for single-cell data
+        self._sc_tree = CassiopeiaTree(character_matrix=self.sc_matrix_masked)
 
-        # solve trees
+        logger.info(
+            f"Sampled {len(self.sc_cell_ids)} cells (SC) and "
+            f"{len(self.sm_cell_ids)} cells with molecules (SM)"
+        )
 
-    def solve_fractions(self, fraction:str="all", solver:str|None=None):
+    def solve_fractions(
+        self,
+        fraction: str = "all",
+        solver: str | None = None,
+        collapse_mutationless_edges: bool = True,
+    ) -> None:
+        """
+        Solve (reconstruct) trees for sampled fractions.
+
+        Parameters
+        ----------
+        fraction
+            Which fraction to solve ('all', 'sc', 'sm')
+        solver
+            Solver name (if None, uses self.solver)
+        collapse_mutationless_edges
+            Whether to collapse mutationless edges
+        """
         if solver is not None:
             self.solver = solvers.get_solver_class(solver)
 
-        match fraction:
-            case "all":
+        if fraction in ['all', 'sc']:
                 logger.info("Solving all sub-trees")
-                self.solver.solve(self.sc_tree)
-                logger.info("Solved single-cell")
-
-                for k,v in self.sm_trees.items():
-                    self.solver.solve(v)
+                self.solver.solve(self._sc_tree, collapse_mutationless_edges=collapse_mutationless_edges)
+                self.lineage_forest.obst["sc"] = self._sc_tree.get_tree_topology()
+                logger.info("Solved single-cell tree")
+        if fraction in ['all', 'sm']:
+                for k, v in self._sm_trees.items():
+                    self.solver.solve(v, collapse_mutationless_edges=collapse_mutationless_edges)
+                    self.lineage_forest.obst[k] = v.get_tree_topology()
                     logger.info(f"Solved {k}")
-            case "sc":
-                self.solver.solve(self.sc_tree)
 
 
-    def simulate(self, sc_rate=0.1, sm_rate=0.5):
+    def simulate(
+        self,
+        sc_rate: float = 0.1,
+        sm_rate: float = 0.5,
+        solver: str | None = None,
+        collapse_mutationless_edges: bool = True,
+    ) -> None:
+        """
+        Run complete simulation workflow.
+
+        Executes: ground truth → recording → sampling → solving
+
+        Parameters
+        ----------
+        sc_rate
+            Fraction of cells to sample for single-cell
+        sm_rate
+            Fraction of cells to sample for single-molecule
+        solver
+            Solver name (if None, uses default)
+        collapse_mutationless_edges
+            Whether to collapse mutationless edges
+        """
         self.simulate_gt()
         self.simulate_recording()
         self.sample_fractions(sc_rate=sc_rate, sm_rate=sm_rate)
+        self.solve_fractions(solver=solver, collapse_mutationless_edges=collapse_mutationless_edges)
 
-        self.solve_fractions()
+    # ═══════════════════════════════════════════════════════════
+    # I/O
+    # ═══════════════════════════════════════════════════════════
 
-    def save(self, filepath):
-        """Save the simulation object to a file using pickle.
+    def save(self, filepath: Path | str) -> None:
+        """
+        Save complete simulation object.
 
         Parameters
         ----------
-        filepath : str or Path
+        filepath
             Path to save the pickled object
         """
         import pickle
-        with open(filepath, 'wb') as f:
+
+        with open(filepath, "wb") as f:
             pickle.dump(self, f)
+        logger.info(f"Saved simulation to {filepath}")
 
     @staticmethod
-    def load(filepath):
-        """Load a simulation object from a pickle file.
+    def load(filepath: Path | str) -> SimulatedLineageForest:
+        """
+        Load simulation object from pickle file.
 
         Parameters
         ----------
-        filepath : str or Path
+        filepath
             Path to the pickled object
 
         Returns
         -------
-        Simsmolscells
-            The loaded simulation object
+        The loaded simulation object
         """
         import pickle
-        with open(filepath, 'rb') as f:
+
+        with open(filepath, "rb") as f:
             return pickle.load(f)
+
+
+# ═══════════════════════════════════════════════════════════
+# CONVENIENCE FUNCTION
+# ═══════════════════════════════════════════════════════════
+
+
+def simulate_lineage_experiment(
+    conf_gt: dict[str, Any] | None = None,
+    conf_exp: dict[str, Any] | None = None,
+    conf_dropout: dict[str, Any] | None = None,
+    sc_rate: float = 0.1,
+    sm_rate: float = 0.5,
+    solver: str = "nj",
+    return_simulation: bool = False,
+) -> LineageForest | SimulatedLineageForest:
+    """
+    One-shot simulation function.
+
+    Creates a complete simulated lineage tracing experiment with ground truth,
+    recording, sampling, and tree reconstruction.
+
+    Parameters
+    ----------
+    conf_gt
+        Ground truth simulation configuration
+    conf_exp
+        Recording simulation configuration
+    conf_dropout
+        Dropout configuration
+    sc_rate
+        Fraction of cells to sample for single-cell
+    sm_rate
+        Fraction of cells to sample for single-molecule
+    solver
+        Solver name (e.g., 'nj', 'upgma')
+    return_simulation
+        If True, return SimulatedLineageForest; if False, return LineageForest
+
+    Returns
+    -------
+    LineageForest (if return_simulation=False) or SimulatedLineageForest (if True)
+
+    Examples
+    --------
+    >>> # Get observational data only
+    >>> lf = simulate_lineage_experiment(sc_rate=0.1, sm_rate=0.5)
+    >>> lf.plot_tree(tree='sc')
+    >>>
+    >>> # Get full simulation object
+    >>> sim = simulate_lineage_experiment(sc_rate=0.1, sm_rate=0.5, return_simulation=True)
+    >>> print(sim.gt_tree)
+    >>> lf = sim.lineage_forest
+    """
+    sim = SimulatedLineageForest(conf_gt=conf_gt, conf_exp=conf_exp, conf_dropout=conf_dropout)
+    sim.simulate(sc_rate=sc_rate, sm_rate=sm_rate, solver=solver)
+
+    if return_simulation:
+        return sim
+    else:
+        return sim.lineage_forest
+
 
 

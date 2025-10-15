@@ -11,7 +11,10 @@ from cassiopeia import solver
 SOLVERS_CONFIG = {
     'nj': {
         'name': 'Neighbor Joining',
-        'class': lambda: solver.NeighborJoiningSolver(add_root=True),
+        'class': lambda: solver.NeighborJoiningSolver(
+            dissimilarity_function=solver.dissimilarity.weighted_hamming_distance,
+            add_root=True
+        ),
         'enabled': True
     },
     'maxcut': {

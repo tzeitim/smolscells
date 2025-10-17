@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 from pathlib import Path
 import logging
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import pandas as pd
@@ -25,7 +26,6 @@ from .sampling import (
 )
 from . import solvers
 
-logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════
 # DEFAULT CONFIGURATIONS
@@ -42,12 +42,18 @@ def _state_generating_distribution():
     return np.random.exponential(1e-5)
 
 
-def return_default_conf_gt():
+def return_default_conf_gt(random_seed:int|None=None):
     """Return default ground truth simulation configuration."""
+    if random_seed is None:
+        random_seed = 1717
+    else:
+        assert isinstance(random_seed, int), "Parameter random_seed must be an integer"
+
     return {
         "birth_waiting_distribution": _birth_waiting_distribution,
         "initial_birth_scale": 2,
         "num_extant": 1000,
+        "random_seed": random_seed,
     }
 
 
@@ -120,7 +126,7 @@ class SimulatedLineageForest:
         Cell IDs in single-molecule fraction
     sm_mats : dict | None
         Single-molecule matrices by intBC
-    lineage_forest : LineageForest
+    lf : LineageForest
         Observational data (solved trees)
     solver : Any
         Cassiopeia solver instance
@@ -132,7 +138,7 @@ class SimulatedLineageForest:
     >>> sim.simulate(sc_rate=0.1, sm_rate=0.5)
     >>>
     >>> # Access observational data
-    >>> lf = sim.lineage_forest
+    >>> lf = sim.lf
     >>> lf.plot_tree(tree='sc')
     >>>
     >>> # Compare to ground truth
@@ -185,7 +191,7 @@ class SimulatedLineageForest:
         self.sm_mats: dict | None = None
 
         # Observational data container
-        self.lineage_forest = LineageForest(alignment="subset")
+        self.lf = LineageForest(alignment="subset")
 
         # CassiopeiaTree objects for solving
         self._sc_tree: CassiopeiaTree | None = None
@@ -280,10 +286,12 @@ class SimulatedLineageForest:
         """
         Solve (reconstruct) trees for sampled fractions.
 
+        Populates the lf with solved trees and character matrices.
+
         Parameters
         ----------
         fraction
-            Which fraction to solve ('all', 'sc', 'sm')
+            Which fraction to solve ('all', 'sc', 'sm', 'exp_tree')
         solver
             Solver name (if None, uses self.solver)
         collapse_mutationless_edges
@@ -292,17 +300,78 @@ class SimulatedLineageForest:
         if solver is not None:
             self.solver = solvers.get_solver_class(solver)
 
+        # Solve single-cell tree
         if fraction in ['all', 'sc']:
-                logger.info("Solving all sub-trees")
-                self.solver.solve(self._sc_tree, collapse_mutationless_edges=collapse_mutationless_edges)
-                self.lineage_forest.obst["sc"] = self._sc_tree.get_tree_topology()
-                logger.info("Solved single-cell tree")
-        if fraction in ['all', 'sm']:
-                for k, v in self._sm_trees.items():
-                    self.solver.solve(v, collapse_mutationless_edges=collapse_mutationless_edges)
-                    self.lineage_forest.obst[k] = v.get_tree_topology()
-                    logger.info(f"Solved {k}")
+            logger.info("Solving single-cell tree")
+            self.solver.solve(self._sc_tree, collapse_mutationless_edges=collapse_mutationless_edges)
 
+            # Import SC tree into LineageForest (creates or replaces)
+            if self.lf.n_obs == 0:
+                # Create new LineageForest from SC tree
+                self.lf = LineageForest.from_cassiopeia_tree(
+                    self._sc_tree,
+                    tree_type='sc',
+                    alignment="subset"
+                )
+            else:
+                # Add SC tree to existing forest
+                self.lf.add_cassiopeia_tree(
+                    self._sc_tree,
+                    tree_type='sc'
+                )
+            logger.info("Solved and added single-cell tree")
+
+        # Solve single-molecule trees
+        if fraction in ['all', 'sm']:
+            for intbc_key, sm_tree in self._sm_trees.items():
+                # Extract integer intbc_id from key (e.g., 'intbc_0' -> 0)
+                if isinstance(intbc_key, str) and intbc_key.startswith('intbc_'):
+                    intbc_id = int(intbc_key.replace('intbc_', ''))
+                else:
+                    # If already an integer or simple string number
+                    intbc_id = int(intbc_key)
+
+                logger.info(f"Solving single-molecule tree {intbc_id}")
+                self.solver.solve(sm_tree, collapse_mutationless_edges=collapse_mutationless_edges)
+
+                # Import SM tree into LineageForest
+                if self.lf.n_obs == 0:
+                    # Create new LineageForest from first SM tree
+                    self.lf = LineageForest.from_cassiopeia_tree(
+                        sm_tree,
+                        tree_type='sm',
+                        intbc_id=intbc_id,
+                        alignment="subset"
+                    )
+                else:
+                    # Add SM tree to existing forest
+                    self.lf.add_cassiopeia_tree(
+                        sm_tree,
+                        tree_type='sm',
+                        intbc_id=intbc_id
+                    )
+                logger.info(f"Solved and added SM tree {intbc_id}")
+
+        # Solve experimental tree (full tree before sampling)
+        if fraction in ['exp_tree']:
+            logger.info("Solving experimental tree")
+            self.solver.solve(self.exp_tree, collapse_mutationless_edges=collapse_mutationless_edges)
+
+            # Add as special tree (keep as 'exp_tree' in obst, but treat as SC type)
+            if self.lf.n_obs == 0:
+                self.lf = LineageForest.from_cassiopeia_tree(
+                    self.exp_tree,
+                    tree_type='sc',
+                    tree_key='exp_tree',
+                    alignment="subset"
+                )
+            else:
+                self.lf.add_cassiopeia_tree(
+                    self.exp_tree,
+                    tree_type='sc',
+                    tree_key='exp_tree'
+                )
+            logger.info("Solved and added experimental tree")
 
     def simulate(
         self,
@@ -421,7 +490,7 @@ def simulate_lineage_experiment(
     >>> # Get full simulation object
     >>> sim = simulate_lineage_experiment(sc_rate=0.1, sm_rate=0.5, return_simulation=True)
     >>> print(sim.gt_tree)
-    >>> lf = sim.lineage_forest
+    >>> lf = sim.lf
     """
     sim = SimulatedLineageForest(conf_gt=conf_gt, conf_exp=conf_exp, conf_dropout=conf_dropout)
     sim.simulate(sc_rate=sc_rate, sm_rate=sm_rate, solver=solver)
@@ -429,7 +498,7 @@ def simulate_lineage_experiment(
     if return_simulation:
         return sim
     else:
-        return sim.lineage_forest
+        return sim.lf
 
 
 

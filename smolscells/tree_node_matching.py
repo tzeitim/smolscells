@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Post-order traversal algorithm for finding matching nodes between phylogenetic trees.
 
@@ -220,6 +219,7 @@ class TreeNodeMatcher:
                                     source_tree: cass.data.CassiopeiaTree,
                                     target_tree: cass.data.CassiopeiaTree,
                                     leaves_under_u: Optional[Set[str]] = None,
+                                    source_tree_name: Optional[str] = None,
                                     target_tree_name: Optional[str] = None) -> NodeMatch:
         """
         Post-order traversal to find matching nodes between trees.
@@ -234,7 +234,8 @@ class TreeNodeMatcher:
             source_tree: Source CassiopeiaTree
             target_tree: Target CassiopeiaTree
             leaves_under_u: Set of leaves descended from u (computed if None)
-            target_tree_name: Name of target tree (for intBC extraction)
+            source_tree_name: Name of source tree (for bidirectional intBC extraction)
+            target_tree_name: Name of target tree (for bidirectional intBC extraction)
 
         Returns:
             NodeMatch object with matching information
@@ -245,7 +246,7 @@ class TreeNodeMatcher:
         
         # Base case: leaf node
         if source_tree.is_leaf(u):
-            return self._match_leaf_node(u, source_tree, target_tree, target_tree_name)
+            return self._match_leaf_node(u, source_tree, target_tree, source_tree_name, target_tree_name)
 
         # Recursive case: internal node
         # Process children first (post-order traversal)
@@ -260,7 +261,7 @@ class TreeNodeMatcher:
         for child in children:
             child_leaves = self._get_leaves_under(child, source_tree)
             child_match = self.find_matching_node_recursive(
-                child, source_tree, target_tree, child_leaves, target_tree_name
+                child, source_tree, target_tree, child_leaves, source_tree_name, target_tree_name
             )
             child_matches.append(child_match)
 
@@ -298,7 +299,7 @@ class TreeNodeMatcher:
         char_similarity = None
         if target_node is not None:
             char_similarity = self._compute_character_similarity(
-                u, target_node, source_tree, target_tree, target_tree_name
+                u, target_node, source_tree, target_tree, source_tree_name, target_tree_name
             )
         
         return NodeMatch(
@@ -314,6 +315,7 @@ class TreeNodeMatcher:
                         leaf: Any,
                         source_tree: cass.data.CassiopeiaTree,
                         target_tree: cass.data.CassiopeiaTree,
+                        source_tree_name: Optional[str] = None,
                         target_tree_name: Optional[str] = None) -> NodeMatch:
         """
         Match a leaf node between trees.
@@ -322,7 +324,8 @@ class TreeNodeMatcher:
             leaf: Leaf node in source tree
             source_tree: Source tree
             target_tree: Target tree
-            target_tree_name: Name of target tree (for intBC extraction)
+            source_tree_name: Name of source tree (for bidirectional intBC extraction)
+            target_tree_name: Name of target tree (for bidirectional intBC extraction)
 
         Returns:
             NodeMatch for the leaf
@@ -333,7 +336,7 @@ class TreeNodeMatcher:
             source_states = source_tree.get_character_states(leaf)
             target_states = target_tree.get_character_states(leaf)
 
-            char_similarity = self._hamming_similarity(source_states, target_states, target_tree_name)
+            char_similarity = self._hamming_similarity(source_states, target_states, source_tree_name, target_tree_name)
 
             # Use character similarity as the score
             # If similarity meets threshold, consider it a match
@@ -505,6 +508,7 @@ class TreeNodeMatcher:
                                      node2: Any,
                                      tree1: cass.data.CassiopeiaTree,
                                      tree2: cass.data.CassiopeiaTree,
+                                     tree1_name: Optional[str] = None,
                                      tree2_name: Optional[str] = None) -> float:
         """
         Compute character state similarity between two nodes.
@@ -514,7 +518,8 @@ class TreeNodeMatcher:
             node2: Node in tree2
             tree1: First tree
             tree2: Second tree
-            tree2_name: Name of tree2 (for intBC extraction)
+            tree1_name: Name of tree1 (for bidirectional intBC extraction)
+            tree2_name: Name of tree2 (for bidirectional intBC extraction)
 
         Returns:
             Similarity score (0.0 to 1.0)
@@ -522,7 +527,7 @@ class TreeNodeMatcher:
         try:
             states1 = tree1.get_character_states(node1)
             states2 = tree2.get_character_states(node2)
-            return self._hamming_similarity(states1, states2, tree2_name)
+            return self._hamming_similarity(states1, states2, tree1_name, tree2_name)
         except:
             return 0.0
 
@@ -580,23 +585,30 @@ class TreeNodeMatcher:
     def _hamming_similarity(self,
                            states1: np.ndarray,
                            states2: np.ndarray,
+                           tree1_name: Optional[str] = None,
                            tree2_name: Optional[str] = None) -> float:
         """
         Compute character state similarity using configured dissimilarity function.
 
         Handles conversion between distance and similarity metrics automatically.
-        For comparing SC trees (full allele) to bulk trees (single intBC),
-        extracts the relevant intBC portion from states1 before comparison.
+        Supports bidirectional intBC extraction: extracts from whichever array is longer
+        based on tree names that contain "intbc".
 
         Args:
             states1: Character states from first node (source)
             states2: Character states from second node (target)
-            tree2_name: Name of target tree (for intBC extraction)
+            tree1_name: Name of tree1 (for bidirectional intBC extraction)
+            tree2_name: Name of tree2 (for bidirectional intBC extraction)
 
         Returns:
             Similarity score (0.0 to 1.0, higher = more similar)
         """
         # Handle different input formats for different Cassiopeia functions
+        import logging
+        logger = logging.getLogger(__name__)
+
+        logger.debug(f"using {self._dissimilarity_function_name}")
+
         if self._dissimilarity_function_name == 'hamming_distance':
             # hamming_distance requires np.array (numba compiled)
             states1_input = np.asarray(states1)
@@ -605,22 +617,51 @@ class TreeNodeMatcher:
             # Other functions require lists
             states1_input = list(np.asarray(states1))
             states2_input = list(np.asarray(states2))
+            logger.debug(f"\n{states1_input}\n{states2_input}")
 
-        # Extract intBC-specific allele if target is bulk tree
-        if tree2_name and self.num_intbc and self.cassette_size:
-            intbc_idx = self._identify_intbc_from_name(tree2_name)
-            if intbc_idx is not None:
+        # Bidirectional intBC extraction: check which tree has single intBC
+        # Extract from whichever array is longer based on the intBC tree name
+        extracted_intbc_idx = None
+        if self.num_intbc and self.cassette_size:
+            # Check if either tree name indicates a single intBC
+            intbc_idx_1 = self._identify_intbc_from_name(tree1_name) if tree1_name else None
+            intbc_idx_2 = self._identify_intbc_from_name(tree2_name) if tree2_name else None
+
+            # Determine which tree has the full allele (more characters) and which has single intBC
+            len1 = len(states1_input)
+            len2 = len(states2_input)
+            expected_full_length = self.num_intbc * self.cassette_size
+            expected_single_length = self.cassette_size
+
+            # Case 1: states1 is full, states2 is single intBC
+            if (len1 >= expected_full_length and len2 <= expected_single_length and intbc_idx_2 is not None):
                 extracted = self._extract_intbc_allele(
-                    np.array(states1_input), intbc_idx, self.num_intbc, self.cassette_size
+                    np.array(states1_input), intbc_idx_2, self.num_intbc, self.cassette_size
                 )
                 if extracted is not None:
                     if self._dissimilarity_function_name == 'hamming_distance':
                         states1_input = extracted
                     else:
                         states1_input = list(extracted)
+                    extracted_intbc_idx = intbc_idx_2
+                else:
+                    return 0.0
+            # Case 2: states2 is full, states1 is single intBC
+            elif (len2 >= expected_full_length and len1 <= expected_single_length and intbc_idx_1 is not None):
+                extracted = self._extract_intbc_allele(
+                    np.array(states2_input), intbc_idx_1, self.num_intbc, self.cassette_size
+                )
+                if extracted is not None:
+                    if self._dissimilarity_function_name == 'hamming_distance':
+                        states2_input = extracted
+                    else:
+                        states2_input = list(extracted)
+                    extracted_intbc_idx = intbc_idx_1
                 else:
                     return 0.0
 
+        logger.debug(f"{states1_input=}")
+        logger.debug(f"{states2_input=}")
         # Ensure same length
         min_length = min(len(states1_input), len(states2_input))
         if self._dissimilarity_function_name == 'hamming_distance':
@@ -632,14 +673,13 @@ class TreeNodeMatcher:
 
         # Adjust weights if intBC extraction occurred
         weights = self.weights
-        if weights and tree2_name and self.num_intbc and self.cassette_size:
-            intbc_idx = self._identify_intbc_from_name(tree2_name)
-            if intbc_idx is not None:
-                # Extract weights for this specific intBC
-                start_col = intbc_idx * self.cassette_size
-                end_col = (intbc_idx + 1) * self.cassette_size
-                weights = {i: weights[start_col + i] for i in range(min_length)
-                          if (start_col + i) in weights}
+        logger.debug(f"{weights=}")
+        if weights and extracted_intbc_idx is not None:
+            # Extract weights for the specific intBC that was extracted
+            start_col = extracted_intbc_idx * self.cassette_size
+            end_col = (extracted_intbc_idx + 1) * self.cassette_size
+            weights = {i: weights[start_col + i] for i in range(min_length)
+                      if (start_col + i) in weights}
 
         # Call the configured dissimilarity function
         try:
@@ -658,6 +698,7 @@ class TreeNodeMatcher:
                     missing_state_indicator=self.missing_state_indicator,
                     weights=weights
                 )
+            logger.debug(f"{result=}")
         except Exception as e:
             # Fallback to 0 similarity on error
             return 0.0
@@ -670,12 +711,13 @@ class TreeNodeMatcher:
                 max_distance = len(states1_input)
                 similarity = max(0.0, 1.0 - (result / max_distance)) if max_distance > 0 else 0.0
             else:  # weighted_hamming_distance
-                # Normalized distance ranges from 0 to ~2
-                similarity = max(0.0, 1.0 - (result / 2.0))
+                # Normalized distance ranges from 0 to 1
+                similarity = max(0.0, 1.0 - result)
         else:
             # Already a similarity metric
             similarity = result
 
+        logger.debug(f"{similarity=}")
         return similarity
     
     def compute_internal_node_statistics(self,
@@ -719,6 +761,7 @@ class TreeNodeMatcher:
     def map_nodes_between_trees(self,
                                source_tree: cass.data.CassiopeiaTree,
                                target_tree: cass.data.CassiopeiaTree,
+                               source_tree_name: Optional[str] = None,
                                target_tree_name: Optional[str] = None,
                                return_all_matches: bool = False) -> Union[Dict[Any, Any], Dict[Any, NodeMatch]]:
         """
@@ -730,7 +773,8 @@ class TreeNodeMatcher:
         Args:
             source_tree: Source tree
             target_tree: Target tree
-            target_tree_name: Name of target tree (for intBC extraction)
+            source_tree_name: Name of source tree (for bidirectional intBC extraction)
+            target_tree_name: Name of target tree (for bidirectional intBC extraction)
             return_all_matches: If True, return full NodeMatch objects;
                                if False, return simple node->node mapping
 
@@ -739,7 +783,7 @@ class TreeNodeMatcher:
         """
         # Run the recursive matching once from the root
         root_match = self.find_matching_node_recursive(
-            source_tree.root, source_tree, target_tree, None, target_tree_name
+            source_tree.root, source_tree, target_tree, None, source_tree_name, target_tree_name
         )
 
         # Extract all matches from the nested result
@@ -771,6 +815,7 @@ class TreeNodeMatcher:
     def map_nodes_to_multiple_trees(self,
                                     source_tree: cass.data.CassiopeiaTree,
                                     target_trees: Dict[str, cass.data.CassiopeiaTree],
+                                    source_tree_name: Optional[str] = None,
                                     return_all_matches: bool = False) -> Dict[Any, Dict[str, Union[Any, NodeMatch]]]:
         """
         Create mappings from source tree to multiple target trees at once.
@@ -780,6 +825,7 @@ class TreeNodeMatcher:
         Args:
             source_tree: Source tree
             target_trees: Dict mapping tree names to CassiopeiaTree objects
+            source_tree_name: Name of source tree (for bidirectional intBC extraction)
             return_all_matches: If True, return full NodeMatch objects
 
         Returns:
@@ -787,7 +833,7 @@ class TreeNodeMatcher:
 
         Example:
             >>> matches = matcher.map_nodes_to_multiple_trees(
-            ...     sc_tree, {'gt': gt_tree, 'bulk_0': bulk_tree}
+            ...     sc_tree, {'gt': gt_tree, 'bulk_0': bulk_tree}, source_tree_name='sc'
             ... )
             >>> # matches['node_42'] = {'gt': 'node_10', 'bulk_0': 'node_5'}
         """
@@ -799,7 +845,7 @@ class TreeNodeMatcher:
 
             # Get matches for this target tree
             matches = self.map_nodes_between_trees(
-                source_tree, target_tree, tree_name, return_all_matches
+                source_tree, target_tree, source_tree_name, tree_name, return_all_matches
             )
 
             # Merge into result
@@ -809,6 +855,262 @@ class TreeNodeMatcher:
                 result[source_node][tree_name] = target_info
 
         return result
+
+    # ═══════════════════════════════════════════════════════════
+    # CHARACTER-BASED MATCHING (NO LEAF OVERLAP REQUIRED)
+    # ═══════════════════════════════════════════════════════════
+
+    def find_best_character_match(self,
+                                 source_node: Any,
+                                 source_tree: cass.data.CassiopeiaTree,
+                                 target_candidates: List[Any],
+                                 target_tree: cass.data.CassiopeiaTree,
+                                 source_tree_name: Optional[str] = None,
+                                 target_tree_name: Optional[str] = None,
+                                 warn_ambiguous: bool = True) -> Tuple[Optional[Any], float, List[Tuple[Any, float]]]:
+        """
+        Find the best matching target node based on character state similarity.
+
+        Args:
+            source_node: Node in source tree
+            source_tree: Source tree
+            target_candidates: List of candidate nodes in target tree
+            target_tree: Target tree
+            source_tree_name: Name of source tree (for intBC extraction)
+            target_tree_name: Name of target tree (for intBC extraction)
+            warn_ambiguous: Print warning if multiple candidates have similar scores
+
+        Returns:
+            Tuple of (best_match_node, best_score, all_candidates_with_scores)
+        """
+        if not target_candidates:
+            return None, 0.0, []
+
+        # Get source character states
+        try:
+            source_states = source_tree.get_character_states(source_node)
+        except:
+            return None, 0.0, []
+
+        # Score all candidates
+        candidate_scores = []
+        for candidate in target_candidates:
+            try:
+                target_states = target_tree.get_character_states(candidate)
+                score = self._hamming_similarity(
+                    source_states, target_states, source_tree_name, target_tree_name
+                )
+                candidate_scores.append((candidate, score))
+            except:
+                continue
+
+        if not candidate_scores:
+            return None, 0.0, []
+
+        # Sort by score (descending)
+        candidate_scores.sort(key=lambda x: x[1], reverse=True)
+        best_match, best_score = candidate_scores[0]
+
+        # Check for ambiguous matches (multiple candidates with similar scores)
+        if warn_ambiguous and len(candidate_scores) > 1:
+            second_best_score = candidate_scores[1][1]
+            score_diff = best_score - second_best_score
+
+            # Warn if scores are very close (within 5%)
+            if score_diff < 0.05 and best_score > self.threshold_e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug(
+                    f"Ambiguous match for source node {source_node}: "
+                    f"best={best_match} (score={best_score:.3f}), "
+                    f"second_best={candidate_scores[1][0]} (score={second_best_score:.3f}), "
+                    f"diff={score_diff:.3f}"
+                )
+
+        return best_match, best_score, candidate_scores
+
+    def match_trees_by_character_similarity(self,
+                                           source_tree: cass.data.CassiopeiaTree,
+                                           target_tree: cass.data.CassiopeiaTree,
+                                           source_tree_name: Optional[str] = None,
+                                           target_tree_name: Optional[str] = None,
+                                           min_children_fraction: float = 0.5,
+                                           return_all_matches: bool = False) -> Union[Dict[Any, Any], Dict[Any, NodeMatch]]:
+        """
+        Match trees based on character similarity without requiring leaf name overlap.
+
+        This is a two-phase algorithm:
+        1. Phase 1: Match leaves based on character similarity (O(n·m))
+        2. Phase 2: Match internal nodes using LCA of matched children (O(n))
+
+        Args:
+            source_tree: Source CassiopeiaTree
+            target_tree: Target CassiopeiaTree
+            source_tree_name: Name of source tree (for intBC extraction)
+            target_tree_name: Name of target tree (for intBC extraction)
+            min_children_fraction: Minimum fraction of children that must match for internal node match
+            return_all_matches: If True, return full NodeMatch objects
+
+        Returns:
+            Dictionary mapping source nodes to target nodes (or NodeMatch objects)
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        logger.debug(f"Character-based matching: {len(source_tree.leaves)} source leaves → {len(target_tree.leaves)} target leaves")
+
+        # Phase 1: Leaf-to-leaf matching based on character similarity
+        logger.debug("Phase 1: Matching leaves by character similarity...")
+        leaf_matches = {}
+
+        for source_leaf in source_tree.leaves:
+            best_match, best_score, _ = self.find_best_character_match(
+                source_leaf, source_tree, list(target_tree.leaves), target_tree,
+                source_tree_name, target_tree_name, warn_ambiguous=True
+            )
+
+            if best_match and best_score >= self.threshold_e:
+                leaf_matches[source_leaf] = NodeMatch(
+                    source_node=source_leaf,
+                    target_node=best_match,
+                    score=best_score,
+                    matched_leaves={source_leaf},
+                    character_similarity=best_score
+                )
+
+        logger.debug(f"Phase 1 complete: {len(leaf_matches)}/{len(source_tree.leaves)} leaves matched")
+
+        # Phase 2: Bottom-up internal node matching
+        logger.debug("Phase 2: Matching internal nodes via LCA...")
+        all_matches = {}
+
+        def match_node_recursive(node):
+            """Recursive post-order matching."""
+            # Base case: leaf node
+            if source_tree.is_leaf(node):
+                match = leaf_matches.get(node)
+                if match:
+                    all_matches[node] = match
+                    return match
+                else:
+                    # No match for this leaf
+                    no_match = NodeMatch(
+                        source_node=node,
+                        target_node=None,
+                        score=0.0,
+                        matched_leaves=set(),
+                        character_similarity=None
+                    )
+                    all_matches[node] = no_match
+                    return no_match
+
+            # Recursive case: process children first
+            children = list(source_tree.children(node))
+            child_matches = [match_node_recursive(child) for child in children]
+
+            # Collect matched target nodes from children
+            matched_target_nodes = [
+                m.target_node for m in child_matches
+                if m.target_node is not None and m.score >= self.threshold_e
+            ]
+
+            # Check if enough children matched
+            match_fraction = len(matched_target_nodes) / len(children) if children else 0.0
+
+            if match_fraction < min_children_fraction:
+                # Not enough children matched
+                no_match = NodeMatch(
+                    source_node=node,
+                    target_node=None,
+                    score=match_fraction,
+                    matched_leaves=set(),
+                    character_similarity=None,
+                    metadata={'child_matches': child_matches, 'match_fraction': match_fraction}
+                )
+                all_matches[node] = no_match
+                return no_match
+
+            # Find LCA of matched target nodes
+            if len(matched_target_nodes) == 0:
+                no_match = NodeMatch(
+                    source_node=node,
+                    target_node=None,
+                    score=0.0,
+                    matched_leaves=set(),
+                    character_similarity=None,
+                    metadata={'child_matches': child_matches}
+                )
+                all_matches[node] = no_match
+                return no_match
+
+            elif len(matched_target_nodes) == 1:
+                lca = matched_target_nodes[0]
+            else:
+                try:
+                    lca = target_tree.find_lca(*matched_target_nodes)
+                except:
+                    lca = self._find_lca_manual(target_tree, set(matched_target_nodes))
+
+            if lca is None:
+                no_match = NodeMatch(
+                    source_node=node,
+                    target_node=None,
+                    score=match_fraction,
+                    matched_leaves=set(),
+                    character_similarity=None,
+                    metadata={'child_matches': child_matches, 'lca_failed': True}
+                )
+                all_matches[node] = no_match
+                return no_match
+
+            # Verify match using character similarity
+            char_similarity = self._compute_character_similarity(
+                node, lca, source_tree, target_tree, source_tree_name, target_tree_name
+            )
+
+            if char_similarity >= self.threshold_e:
+                # Match accepted
+                matched_leaves = set()
+                for child_match in child_matches:
+                    matched_leaves.update(child_match.matched_leaves)
+
+                match = NodeMatch(
+                    source_node=node,
+                    target_node=lca,
+                    score=char_similarity,
+                    matched_leaves=matched_leaves,
+                    character_similarity=char_similarity,
+                    metadata={'child_matches': child_matches, 'match_fraction': match_fraction}
+                )
+                all_matches[node] = match
+                return match
+            else:
+                # Character similarity too low - reject match
+                no_match = NodeMatch(
+                    source_node=node,
+                    target_node=None,
+                    score=char_similarity,
+                    matched_leaves=set(),
+                    character_similarity=char_similarity,
+                    metadata={'child_matches': child_matches, 'char_similarity_failed': True}
+                )
+                all_matches[node] = no_match
+                return no_match
+
+        # Start recursive matching from root
+        match_node_recursive(source_tree.root)
+
+        logger.debug(f"Phase 2 complete: {sum(1 for m in all_matches.values() if m.target_node is not None)}/{len(source_tree.nodes)} total nodes matched")
+
+        # Return format based on parameter
+        if return_all_matches:
+            return all_matches
+        else:
+            return {
+                source: match.target_node
+                for source, match in all_matches.items()
+                if match.target_node is not None and match.score >= self.threshold_e
+            }
 
 
 # Example statistic functions for internal nodes

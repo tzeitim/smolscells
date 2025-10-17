@@ -40,13 +40,13 @@ class LineageForest(TreeData):
     ----------
     obst : dict-like
         Observation trees (inherited from TreeData)
-        Keys: 'sc' (single-cell tree), 'sm_<cell_id>' (single-molecule trees)
+        Keys: 'sc' (single-cell tree), '0', '1', '2', ... (single-molecule trees per intBC)
     layers : dict-like
         Character matrices (inherited from TreeData)
         Keys: 'character_matrix_sc', 'character_matrix_sm', etc.
     obs : DataFrame
-        Observations with 'observation_type' ('cell' or 'molecule')
-        and 'parent_cell' columns
+        Observations with 'observation_type' ('cell' or 'molecule'),
+        'parent_cell', and 'intbc_id' (int) columns
 
     Examples
     --------
@@ -374,13 +374,38 @@ class LineageForest(TreeData):
         return self.obs.loc[mol_mask, "parent_cell"].unique().tolist()
 
     @property
+    def intbc_ids(self) -> list[int]:
+        """Integration barcode IDs present in single-molecule data."""
+        if "character_matrices" not in self.uns:
+            return []
+        # Extract intbc IDs from character matrix keys (e.g., 'character_matrix_sm_0' -> 0)
+        ids = []
+        for key in self.uns["character_matrices"].keys():
+            if key.startswith("character_matrix_sm_"):
+                intbc_id = int(key.replace("character_matrix_sm_", ""))
+                ids.append(intbc_id)
+        return sorted(ids)
+
+    @property
     def sc_tree_key(self) -> str:
         """Key for single-cell tree in obst."""
         return "sc"
 
-    def sm_tree_key(self, cell_id: str) -> str:
-        """Key for single-molecule tree in obst."""
-        return f"sm_{cell_id}"
+    def sm_tree_key(self, intbc_id: int | str) -> str:
+        """
+        Key for single-molecule tree in obst.
+
+        Parameters
+        ----------
+        intbc_id : int or str
+            Integration barcode ID (e.g., 0, 1, '0', '1')
+
+        Returns
+        -------
+        str
+            Tree key as string (e.g., '0', '1')
+        """
+        return str(intbc_id)
 
     # ═══════════════════════════════════════════════════════════
     # CLASS METHODS - Construction
@@ -391,7 +416,7 @@ class LineageForest(TreeData):
     def from_experiment(
         cls,
         adata: AnnData,
-        sm_data: dict[str, pd.DataFrame] | None = None,
+        sm_data: dict[int, pd.DataFrame] | None = None,
         **kwargs: Any,
     ) -> LineageForest:
         """
@@ -402,7 +427,8 @@ class LineageForest(TreeData):
         adata
             AnnData with single-cell data
         sm_data
-            Dict of cell_id -> character matrix for single-molecule data
+            Dict of intbc_id (int) -> character matrix for single-molecule data
+            Keys should be integration barcode indices (e.g., 0, 1, 2)
         **kwargs
             Additional TreeData parameters
 
@@ -432,15 +458,115 @@ class LineageForest(TreeData):
 
         return obj
 
+    @classmethod
+    def from_cassiopeia_tree(
+        cls,
+        cas_tree: CassiopeiaTree,
+        tree_type: Literal["sc", "sm"] = "sc",
+        intbc_id: int = 0,
+        tree_key: str | None = None,
+        alignment: Literal["leaves", "nodes", "subset"] = "subset",
+        **kwargs: Any,
+    ) -> LineageForest:
+        """
+        Create LineageForest from a single CassiopeiaTree.
 
-    def _add_molecule_observations(self, sm_data: dict[str, pd.DataFrame]) -> None:
-        """Add molecule-level observations to existing TreeData."""
+        Parameters
+        ----------
+        cas_tree
+            CassiopeiaTree with character matrix and topology
+        tree_type
+            Type of tree: 'sc' for single-cell, 'sm' for single-molecule
+        intbc_id
+            Integration barcode ID (used only if tree_type='sm')
+        tree_key
+            Custom tree key in obst (if None, uses 'sc' or str(intbc_id))
+        alignment
+            Tree-observation alignment type
+        **kwargs
+            Additional TreeData parameters
+
+        Returns
+        -------
+        LineageForest with single tree loaded
+
+        Examples
+        --------
+        >>> # Create from single-cell tree
+        >>> lf = LineageForest.from_cassiopeia_tree(sc_tree, tree_type='sc')
+        >>>
+        >>> # Create from single-molecule tree
+        >>> lf = LineageForest.from_cassiopeia_tree(sm_tree, tree_type='sm', intbc_id=0)
+        """
+        # Extract character matrix and cell IDs
+        char_matrix = cas_tree.character_matrix.copy()
+        cell_ids = char_matrix.index.tolist()
+
+        # Create obs DataFrame
+        obs = pd.DataFrame(index=cell_ids)
+
+        if tree_type == "sc":
+            obs["observation_type"] = "cell"
+            obs["parent_cell"] = obs.index
+            obs["intbc_id"] = pd.NA  # SC observations don't have intbc_id
+            char_matrix_key = "character_matrix_sc"
+            default_tree_key = "sc"
+        elif tree_type == "sm":
+            obs["observation_type"] = "molecule"
+            obs["parent_cell"] = ""  # Unknown for imported SM data
+            obs["intbc_id"] = int(intbc_id)
+            char_matrix_key = f"character_matrix_sm_{intbc_id}"
+            default_tree_key = str(intbc_id)
+        else:
+            raise ValueError(f"Invalid tree_type: {tree_type}. Must be 'sc' or 'sm'")
+        
+        # Use custom tree_key or default
+        final_tree_key = tree_key if tree_key is not None else default_tree_key
+
+        # Create minimal LineageForest - just store tree and character matrix
+        # TODO: implement storage for obs and for now 
+        # don't populate obs to avoid AnnData shape constraints
+        lf = cls(
+            uns={"character_matrices": {char_matrix_key: char_matrix}},
+            alignment=alignment,
+            **kwargs,
+        )
+
+        # Add tree topology if available
+        try:
+            topology = cas_tree.get_tree_topology()
+            if topology is not None:
+                lf.obst[final_tree_key] = topology
+                lf.add_tree_metrics(final_tree_key)
+                logger.info(
+                    f"Created LineageForest from CassiopeiaTree: "
+                    f"{tree_type} tree '{final_tree_key}' with {len(cell_ids)} cells"
+                )
+        except Exception:
+            # Tree has not been initialized
+            logger.warning(
+                f"CassiopeiaTree has no topology. Tree '{final_tree_key}' not added to obst."
+            )
+
+        return lf
+
+    def _add_molecule_observations(self, sm_data: dict[int, pd.DataFrame]) -> None:
+        """
+        Add molecule-level observations to existing TreeData.
+
+        Parameters
+        ----------
+        sm_data : dict
+            Dict of intbc_id (int) -> character matrix DataFrame
+        """
         mol_obs_list = []
 
-        for cell_id, char_matrix in sm_data.items():
+        for intbc_id, char_matrix in sm_data.items():
             mol_df = pd.DataFrame(index=char_matrix.index)
             mol_df["observation_type"] = "molecule"
-            mol_df["parent_cell"] = cell_id
+            mol_df["intbc_id"] = int(intbc_id)  # Ensure integer
+            # Note: parent_cell should be set if known, otherwise leave empty
+            mol_df["parent_cell"] = ""
             mol_obs_list.append(mol_df)
 
         if mol_obs_list:
@@ -458,6 +584,100 @@ class LineageForest(TreeData):
                 obs=combined.obs,
                 var=combined.var if hasattr(combined, "var") else None,
                 layers=dict(combined.layers) if hasattr(combined, "layers") else None,
+            )
+
+    def add_cassiopeia_tree(
+        self,
+        cas_tree: CassiopeiaTree,
+        tree_type: Literal["sc", "sm"] = "sc",
+        intbc_id: int | None = None,
+        tree_key: str | None = None,
+    ) -> None:
+        """
+        Add a CassiopeiaTree to existing LineageForest.
+
+        Appends observations, character matrix, and tree topology to the
+        existing LineageForest. Useful for incrementally building a forest.
+
+        Parameters
+        ----------
+        cas_tree
+            CassiopeiaTree with character matrix and topology
+        tree_type
+            Type of tree: 'sc' for single-cell, 'sm' for single-molecule
+        intbc_id
+            Integration barcode ID (if None for SM, auto-increments from max)
+        tree_key
+            Custom tree key in obst (if None, uses 'sc' or str(intbc_id))
+
+        Examples
+        --------
+        >>> # Create initial LineageForest
+        >>> lf = LineageForest.from_cassiopeia_tree(sc_tree, tree_type='sc')
+        >>>
+        >>> # Add single-molecule trees
+        >>> lf.add_cassiopeia_tree(sm_tree0, tree_type='sm', intbc_id=0)
+        >>> lf.add_cassiopeia_tree(sm_tree1, tree_type='sm', intbc_id=1)
+        """
+        # Extract character matrix
+        char_matrix = cas_tree.character_matrix.copy()
+        cell_ids = char_matrix.index.tolist()
+
+        # Create obs DataFrame for new observations
+        new_obs = pd.DataFrame(index=cell_ids)
+
+        if tree_type == "sc":
+            new_obs["observation_type"] = "cell"
+            new_obs["parent_cell"] = new_obs.index
+            new_obs["intbc_id"] = pd.NA
+            char_matrix_key = "character_matrix_sc"
+            default_tree_key = "sc"
+
+            # Check if SC tree already exists
+            if "sc" in self.obst:
+                logger.warning("SC tree already exists. Replacing with new tree.")
+
+        elif tree_type == "sm":
+            # Auto-increment intbc_id if not provided
+            if intbc_id is None:
+                existing_ids = self.intbc_ids
+                intbc_id = max(existing_ids) + 1 if existing_ids else 0
+                logger.info(f"Auto-assigned intbc_id={intbc_id}")
+
+            new_obs["observation_type"] = "molecule"
+            new_obs["parent_cell"] = ""  # Unknown for imported SM data
+            new_obs["intbc_id"] = int(intbc_id)
+            char_matrix_key = f"character_matrix_sm_{intbc_id}"
+            default_tree_key = str(intbc_id)
+
+            # Check if this intbc_id already exists
+            if intbc_id in self.intbc_ids:
+                logger.warning(f"intBC {intbc_id} already exists. Replacing with new tree.")
+
+        else:
+            raise ValueError(f"Invalid tree_type: {tree_type}. Must be 'sc' or 'sm'")
+
+        # Use custom tree_key or default
+        final_tree_key = tree_key if tree_key is not None else default_tree_key
+
+        # Store character matrix in uns (not layers, due to dimension constraints)
+        if "character_matrices" not in self.uns:
+            self.uns["character_matrices"] = {}
+        self.uns["character_matrices"][char_matrix_key] = char_matrix
+
+        # Add tree topology if available
+        try:
+            topology = cas_tree.get_tree_topology()
+            if topology is not None:
+                self.obst[final_tree_key] = topology
+                self.add_tree_metrics(final_tree_key)
+                logger.info(
+                    f"Added {tree_type} tree '{final_tree_key}' with {len(cell_ids)} cells"
+                )
+        except Exception:
+            # Tree has not been initialized
+            logger.warning(
+                f"CassiopeiaTree has no topology. Tree '{final_tree_key}' not added to obst."
             )
 
     # ═══════════════════════════════════════════════════════════
@@ -493,10 +713,10 @@ class LineageForest(TreeData):
 
         # Reconstruct SC tree
         if fraction in ["all", "sc"]:
-            if "character_matrix_sc" not in self.layers:
-                raise ValueError("No single-cell character matrix found")
-
-            sc_char_matrix = self._get_character_matrix("sc")
+            try:
+                sc_char_matrix = self._get_character_matrix("sc")
+            except ValueError as e:
+                raise ValueError(f"No single-cell character matrix found: {e}")
 
             cas_tree = CassiopeiaTree(
                 character_matrix=sc_char_matrix, missing_state_indicator=-1
@@ -509,11 +729,11 @@ class LineageForest(TreeData):
 
         # Reconstruct SM trees
         if fraction in ["all", "sm"]:
-            if "character_matrix_sm" not in self.layers:
-                raise ValueError("No single-molecule character matrix found")
+            if not self.intbc_ids:
+                raise ValueError("No single-molecule data found")
 
-            for cell_id in self.sm_cell_ids:
-                sm_char_matrix = self._get_character_matrix("sm", cell_id=cell_id)
+            for intbc_id in self.intbc_ids:
+                sm_char_matrix = self._get_character_matrix("sm", intbc_id=intbc_id)
 
                 cas_tree = CassiopeiaTree(
                     character_matrix=sm_char_matrix, missing_state_indicator=-1
@@ -521,37 +741,52 @@ class LineageForest(TreeData):
                 solver.solve(cas_tree, collapse_mutationless_edges=False)
 
                 # Store in obst
-                self.obst[self.sm_tree_key(cell_id)] = cas_tree.get_tree_topology()
+                self.obst[self.sm_tree_key(intbc_id)] = cas_tree.get_tree_topology()
                 logger.info(
-                    f"Reconstructed SM tree for {cell_id} ({len(cas_tree.leaves)} leaves)"
+                    f"Reconstructed SM tree for {intbc_id} ({len(cas_tree.leaves)} leaves)"
                 )
 
     def _get_character_matrix(
         self,
         fraction: Literal["sc", "sm"],
-        cell_id: str | None = None,
+        intbc_id: int | str | None = None,
     ) -> pd.DataFrame:
-        """Get character matrix for a specific fraction."""
-        if "observation_type" not in self.obs.columns:
-            raise ValueError("observation_type column not found in obs")
+        """
+        Get character matrix for a specific fraction.
+
+        Parameters
+        ----------
+        fraction : {'sc', 'sm'}
+            Fraction type: 'sc' for single-cell, 'sm' for single-molecule
+        intbc_id : int or str, optional
+            Integration barcode ID (required for SM fraction)
+
+        Returns
+        -------
+        pd.DataFrame
+            Character matrix for the specified fraction
+        """
+        # Character matrices are stored in uns, not layers (due to dimension constraints)
+        if "character_matrices" not in self.uns:
+            raise ValueError("No character matrices found in uns")
 
         if fraction == "sc":
-            layer_key = "character_matrix_sc"
-            mask = self.obs["observation_type"] == "cell"
-            obs_indices = self.obs[mask].index
+            char_matrix_key = "character_matrix_sc"
         elif fraction == "sm":
-            if cell_id is None:
-                raise ValueError("Must provide cell_id for SM fraction")
-            layer_key = "character_matrix_sm"
-            mask = (self.obs["observation_type"] == "molecule") & (
-                self.obs["parent_cell"] == cell_id
-            )
-            obs_indices = self.obs[mask].index
+            if intbc_id is None:
+                raise ValueError("Must provide intbc_id for SM fraction")
+            # Convert to int for key generation
+            intbc_id_int = int(intbc_id)
+            char_matrix_key = f"character_matrix_sm_{intbc_id_int}"
         else:
             raise ValueError(f"Unknown fraction: {fraction}")
 
-        char_matrix = self.layers[layer_key].loc[obs_indices]
-        return char_matrix.dropna(how="all")
+        # Retrieve character matrix from uns
+        if char_matrix_key not in self.uns["character_matrices"]:
+            raise ValueError(f"Character matrix '{char_matrix_key}' not found")
+
+        char_matrix = self.uns["character_matrices"][char_matrix_key]
+        return char_matrix.copy()
 
     # ═══════════════════════════════════════════════════════════
     # TREE ACCESSORS
@@ -581,20 +816,37 @@ class LineageForest(TreeData):
             return nx_tree
 
         # Convert to CassiopeiaTree
+        # Note: populate_tree must be called BEFORE setting character matrix
+        # because populate_tree calls set_character_states_at_leaves which
+        # validates that character matrix indices match tree leaves
         char_matrix = self._get_character_matrix("sc")
         cas_tree = CassiopeiaTree(
-            character_matrix=char_matrix, missing_state_indicator=-1
+            missing_state_indicator=-1
         )
         cas_tree.populate_tree(nx_tree)
+        cas_tree.character_matrix = char_matrix
         return cas_tree
 
     def get_sm_tree(
         self,
-        cell_id: str,
+        intbc_id: int | str,
         as_cassiopeia: bool = False,
     ) -> nx.DiGraph | CassiopeiaTree | None:
-        """Get single-molecule tree for specific cell."""
-        tree_key = self.sm_tree_key(cell_id)
+        """
+        Get single-molecule tree for specific integration barcode.
+
+        Parameters
+        ----------
+        intbc_id : int or str
+            Integration barcode ID (e.g., 0, 1, '0', '1')
+        as_cassiopeia : bool
+            If True, return CassiopeiaTree; if False, return networkx DiGraph
+
+        Returns
+        -------
+        Tree in requested format, or None if not reconstructed yet
+        """
+        tree_key = self.sm_tree_key(intbc_id)
         if tree_key not in self.obst:
             return None
 
@@ -604,21 +856,32 @@ class LineageForest(TreeData):
             return nx_tree
 
         # Convert to CassiopeiaTree
-        char_matrix = self._get_character_matrix("sm", cell_id=cell_id)
+        # Note: populate_tree must be called BEFORE setting character matrix
+        # because populate_tree calls set_character_states_at_leaves which
+        # validates that character matrix indices match tree leaves
+        char_matrix = self._get_character_matrix("sm", intbc_id=intbc_id)
         cas_tree = CassiopeiaTree(
-            character_matrix=char_matrix, missing_state_indicator=-1
+            missing_state_indicator=-1
         )
         cas_tree.populate_tree(nx_tree)
+        cas_tree.character_matrix = char_matrix
         return cas_tree
 
     def get_all_sm_trees(
         self,
         as_cassiopeia: bool = False,
     ) -> dict[str, nx.DiGraph | CassiopeiaTree | None]:
-        """Get all single-molecule trees."""
+        """
+        Get all single-molecule trees.
+
+        Returns
+        -------
+        dict
+            Dictionary mapping intbc_id -> tree
+        """
         return {
-            cell_id: self.get_sm_tree(cell_id, as_cassiopeia=as_cassiopeia)
-            for cell_id in self.sm_cell_ids
+            intbc_id: self.get_sm_tree(intbc_id, as_cassiopeia=as_cassiopeia)
+            for intbc_id in self.intbc_ids
         }
 
     # ═══════════════════════════════════════════════════════════
@@ -632,7 +895,7 @@ class LineageForest(TreeData):
         Parameters
         ----------
         tree
-            Tree key in .obst (e.g., 'sc', 'sm_cell_001')
+            Tree key in .obst (e.g., 'sc', '0', '1', '2')
         **kwargs
             Additional arguments for pc.pl.plot_tree
 
@@ -643,12 +906,34 @@ class LineageForest(TreeData):
         import pycea as pc
 
         return pc.pl.plot_tree(self, tree=tree, **kwargs)
+    
+    def plot_parallel(self, tree: str  | None = None, figsize=None, **kwargs: Any) -> Any:
+        """
+        """
+        import pycea as pc
+        import matplotlib.pyplot as plt
+        actual_layers = self.obst_keys() if tree is None else [tree]
 
-    def add_tree_metrics(self, tree: str = "sc") -> None:
+        if figsize is None:
+            figsize=(len(actual_layers)*2.5, 50)
+        fig, axes = plt.subplots(1, len(actual_layers), figsize=figsize)
+
+        for i, tree in enumerate(actual_layers):
+            pc.pl.tree(self, tree=tree, ax=axes[i], **kwargs)
+
+        plt.tight_layout()
+    
+        return fig
+
+    def add_tree_metrics(self, tree: str | None = None) -> None:
         """Add tree metrics using pycea."""
         import pycea as pc
-
-        pc.pp.add_depth(self, tree=tree)
+        if tree is None:
+            # iterate through all trees 
+            for tree in self.obst_keys():
+                pc.pp.add_depth(self, tree=tree)
+        else:
+            pc.pp.add_depth(self, tree=tree)
 
     # ═══════════════════════════════════════════════════════════
     # I/O

@@ -100,7 +100,7 @@ class LineageForest:
     @property
     def tree_keys(self) -> list[str]:
         """ All tree keys """
-        return list(self.tree.keys())
+        return list(self.trees.keys())
 
     @property
     def intbc_ids(self) -> list[int]:
@@ -123,7 +123,7 @@ class LineageForest:
             pickle.dump(self, f)
 
     @staticmethod
-    def load(filepath: Path | str) -> LineageForest:
+    def load(filepath: Path | str) -> "LineageForest":
         """Load LineageForest."""
         import pickle
         with open(filepath, 'rb') as f:

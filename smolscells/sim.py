@@ -258,7 +258,9 @@ class SimulatedLineageForest:
 
         # Compute dropout stats
         cmultipliers, intdbrates = compute_single_cell_dropout(
-            character_matrix=self.sc_matrix, dropout_config=self.conf_dropout
+            character_matrix=self.sc_matrix,
+            dropout_config=self.conf_dropout,
+            number_of_cassettes=self.conf_exp.get("number_of_cassettes")
         )
 
         # Apply dropout to single-cell data

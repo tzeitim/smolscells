@@ -102,17 +102,17 @@ def split_single_molecule_data(
         n_sample = min(int(len(character_matrix) * sampling_rate), len(sm_cell_ids))
 
         if n_sample == 0:
-            logger.warning(f"No cells available for intbc_{intbc_idx}")
+            logger.warning(f"No cells available for intBC {intbc_idx}")
             continue
 
         sampled_cells = np.random.choice(sm_cell_ids, size=n_sample, replace=False)
 
         # Create intbc matrix using only the relevant integration barcode data
         intbc_matrix = intbc_data.loc[sampled_cells].copy()
-        intbc_matrix.columns = [f'intbc_{intbc_idx}_site_{i}' for i in range(size_of_cassette)]
+        intbc_matrix.columns = [f'site_{i}' for i in range(size_of_cassette)]
 
-        single_molecule_data[f'intbc_{intbc_idx}'] = intbc_matrix
-        logger.info(f"Generated intbc_{intbc_idx} dataset: {intbc_matrix.shape}")
+        single_molecule_data[str(intbc_idx)] = intbc_matrix
+        logger.info(f"Generated intBC {intbc_idx} dataset: {intbc_matrix.shape}")
 
     logger.info(f"Generated {len(single_molecule_data)} single-molecule datasets")
     logger.info(f"Each dataset samples from {len(sm_cell_ids)} available bulk cells")
@@ -124,28 +124,31 @@ def compute_single_cell_dropout(
     cell_multiplier: str = "inverse",
     base_dropout_rate: float = 0.15,
     dropout_config: Dict[str, Any]={},
-    cassette_config: Dict[str, Any]={}
+    cassette_config: Dict[str, Any]={},
+    number_of_cassettes: Optional[int] = None
     ) :
     """
     Compute dropout to single-cell data based on specified pattern
-    
+
     Args:
         character_matrix: Input character matrix
         dropout_config: Dropout configuration
         cassette_config: Cassette configuration (for intbc information)
-        
+        number_of_cassettes: Number of integration barcodes (cassettes)
+
     Returns:
         Character matrix with dropout applied
     """
     matrix = character_matrix.copy()
     base_dropout_rate = dropout_config.get('rate', 0.15)
     intbc_variability = dropout_config.get('intbc_variability', 0.1)
-    
+
     # Block-level dropout: entire intbc blocks are lost per cell
-    num_intbc = cassette_config.get('num_intbc', 4)
+    # Use provided number_of_cassettes or fall back to cassette_config or default to 4
+    num_intbc = number_of_cassettes or cassette_config.get('num_intbc') or cassette_config.get('number_of_cassettes', 4)
     # Different dropout rates per cell (simulating cell quality variation)
     cell_variability = dropout_config.get('cell_variability', 0.2)
-    
+
     # Parameters
     n_cells, num_sites = matrix.shape
 

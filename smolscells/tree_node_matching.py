@@ -564,23 +564,21 @@ class TreeNodeMatcher:
         """
         Identify which intBC index a tree name represents.
 
+        Tree names are numeric strings: '0', '1', '2', etc.
+
         Args:
-            tree_name: Tree identifier (e.g., 'intbc_0', 'single_molecule_intbc_3')
+            tree_name: Tree identifier (e.g., '0', '1', '2')
 
         Returns:
             Integration barcode index or None
         """
-        if tree_name.startswith('intbc_'):
-            try:
-                return int(tree_name.split('_')[1])
-            except:
-                return None
-        elif 'intbc' in tree_name.lower():
-            import re
-            match = re.search(r'intbc[_\s]*(\d+)', tree_name.lower())
-            if match:
-                return int(match.group(1))
-        return None
+        if tree_name is None:
+            return None
+
+        try:
+            return int(tree_name)
+        except (ValueError, TypeError):
+            return None
     
     def _hamming_similarity(self,
                            states1: np.ndarray,

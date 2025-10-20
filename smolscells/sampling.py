@@ -36,11 +36,12 @@ def mutually_exclusive_sampling(
     all_cell_ids = list(character_matrix.index)
     sampled_cell_ids = np.random.choice(all_cell_ids, size=n_total_sampled, replace=False)
     
-    # Step 2: Split sampled pool into SC vs bulk 
+    # Step 2: Split sampled pool into SC vs bulk
     sc_fraction_of_sample = sc_rate / total_sample_rate
     n_sc = int(len(sampled_cell_ids) * sc_fraction_of_sample)
-    
-    # Split the sampled cells
+
+    # Randomly split the sampled cells (not sequential!)
+    np.random.shuffle(sampled_cell_ids)
     sc_cell_ids = sampled_cell_ids[:n_sc]
     sm_cell_ids = sampled_cell_ids[n_sc:]
     

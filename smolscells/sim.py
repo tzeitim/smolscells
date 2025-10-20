@@ -68,6 +68,7 @@ def return_default_conf_exp(missing_data=False):
         "state_generating_distribution": _state_generating_distribution,
         "number_of_states": 50,
         "state_priors": None,
+        "collapse_sites_on_cassette": False,
         "heritable_silencing_rate": 0,
         "stochastic_silencing_rate": 0,
         "heritable_missing_data_state": -1,
@@ -247,7 +248,7 @@ class SimulatedLineageForest:
         self._sm_trees: dict[str, CassiopeiaTree] = {}
 
     def __repr__(self) -> str:
-        gt_tree = self.lf.get_tree('gt', as_cassiopeia=True)
+        gt_tree = self.gt_tree 
         exp_tree = self.lf.get_tree('exp_tree', as_cassiopeia=True)
           
         # Simulation status
@@ -283,7 +284,7 @@ class SimulatedLineageForest:
 
         # LineageForest info
         if has_lf and self.lf.n_trees > 0:
-            n_solved = len([k for k in self.lf.tree_keys if k not in ('gt', 'exp_tree')])
+            n_solved = len([k for k in self.lf.tree_keys if k not in ('exp_tree')])
             lines.append(f"  Solved trees: {n_solved} ({', '.join(self.lf.tree_keys)})")
 
         # Config summary
@@ -350,15 +351,16 @@ class SimulatedLineageForest:
         if self.gt_tree is None:
             simulator = BirthDeathFitnessSimulator(**self.conf_gt)
 
-            self.lf.add_tree(tree = simulator.simulate_tree(), tree_key="gt")
+            #self.lf.add_tree(tree = simulator.simulate_tree(), tree_key="gt")
+            self.gt_tree = simulator.simulate_tree() 
 
-            logger.info(f"Simulated GT tree with {self.lf.get_tree('gt').n_cell} cells")
+            logger.info(f"Simulated GT tree with {self.gt_tree.n_cell} cells")
         else:
             logger.warning("GT tree already exists")
 
     def simulate_recording(self) -> None:
         """Simulate lineage recording on ground truth."""
-        gt_tree = self.lf.get_tree("gt") 
+        gt_tree = self.gt_tree
         if gt_tree is None:
             raise ValueError("Must simulate ground truth first (call simulate_gt)")
 
@@ -412,20 +414,28 @@ class SimulatedLineageForest:
 
         logger.info(f"Created {len(self.lf.smtrees_keys)} single-molecule trees")
 
-        # Compute dropout stats
-        cmultipliers, intdbrates = compute_single_cell_dropout(
-            character_matrix=self.sc_matrix,
-            dropout_config=self.conf_dropout,
-            number_of_cassettes=self.conf_exp.get("number_of_cassettes")
-        )
+        # Apply dropout to single-cell data if enabled
+        if self.conf_dropout.get('enabled', True):
+            # Compute dropout stats
+            cmultipliers, intdbrates = compute_single_cell_dropout(
+                character_matrix=self.sc_matrix,
+                dropout_config=self.conf_dropout,
+                number_of_cassettes=self.conf_exp.get("number_of_cassettes")
+            )
 
-        # Apply dropout to single-cell data
-        self.sc_matrix_masked, self.sc_matrix_mask = apply_single_cell_dropout(
-            character_matrix=self.sc_matrix,
-            cell_multipliers=cmultipliers,
-            intbc_dropout_rates=intdbrates,
-            sites_per_intbc=self.conf_exp["size_of_cassette"],
-        )
+            # Apply dropout to single-cell data
+            self.sc_matrix_masked, self.sc_matrix_mask = apply_single_cell_dropout(
+                character_matrix=self.sc_matrix,
+                cell_multipliers=cmultipliers,
+                intbc_dropout_rates=intdbrates,
+                sites_per_intbc=self.conf_exp["size_of_cassette"],
+            )
+            logger.info(f"Applied dropout to single-cell data")
+        else:
+            # No dropout - use original matrix
+            self.sc_matrix_masked = self.sc_matrix.copy()
+            self.sc_matrix_mask = None
+            logger.info(f"Dropout disabled - using original single-cell data")
 
         # Create CassiopeiaTree object for single-cell data
         self.lf.add_sc_tree(tree = CassiopeiaTree(character_matrix=self.sc_matrix_masked))
@@ -506,6 +516,7 @@ class SimulatedLineageForest:
         self.lf.initialize_tdatas()
         self.sample_fractions(sc_rate=sc_rate, sm_rate=sm_rate)
         self.solve_fractions(solver=solver, collapse_mutationless_edges=collapse_mutationless_edges)
+        self.lf._sync_tdatas_from_trees()
         print(self.lf)
 
     # ═══════════════════════════════════════════════════════════

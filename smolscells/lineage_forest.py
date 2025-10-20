@@ -10,9 +10,15 @@ class LineageForest:
     """
     Container for multiple lineage trees with optional associated data.
 
+    Architecture:
+    - CassiopeiaTree objects in .trees are the source of truth
+    - TreeData objects in ._tdata_cache are ephemeral visualization cache
+    - Modifications should target CassiopeiaTree or its networkx topology
+    - TreeData is auto-generated from CassiopeiaTree on access
+
     Manages:
     - Multiple CassiopeiaTree objects (topologies + character matrices)
-    - Optional per-tree TreeData objects (created lazily on access)
+    - Optional TreeData cache for visualization (created lazily)
     - Shared TreeData for common data across all trees
     - Unstructured metadata (uns)
     """
@@ -21,14 +27,14 @@ class LineageForest:
         self,
         shared_tdata: TreeData | None = None,
     ):
-        self.trees = {}  # Main trees
-        self.tdatas = {} # gets created lazily from .trees
+        self.trees = {}  # CassiopeiaTree objects - SOURCE OF TRUTH
+        self._tdata_cache = {}  # TreeData cache for visualization - EPHEMERAL
         self.uns = {}
         self.shared_tdata = shared_tdata  # Shared data across all observations
         self._sm_counter = 0 # auto-increment counter for sm trees
 
     def __repr__(self) -> str:
-        has_tdatas = f"  Tdatas: {len(self.tdatas)} ({', '.join(self.tdatas.keys())})\n" if self.tdatas else ""
+        has_tdatas = f"  TreeData cache: {len(self._tdata_cache)} ({', '.join(self._tdata_cache.keys())})\n" if self._tdata_cache else ""
 
         return (
             f"LineageForest\n"
@@ -40,36 +46,48 @@ class LineageForest:
     def __getattr__(self, name: str):
         """Dynamic attribute access with slim naming convention.
 
-        Provides ergonomic access to trees and data without dict keys.
-
         CassiopeiaTree access:
         - lf.csc → single-cell tree
-        - lf.c0, lf.c1, ..., lf.cn → single-molecule trees
+        - lf.c0, lf.c1, ... → single-molecule trees
 
-        TreeData access (lazy loading):
-        - lf.tsc → single-cell data
-        - lf.t0, lf.t1, ..., lf.tn → single-molecule data
+        NetworkX graph access:
+        - lf.gsc → nx.DiGraph for single-cell tree
+        - lf.g0, lf.g1, ... → nx.DiGraph for single-molecule trees
+
+        TreeData access:
+        - lf.tsc → single-cell TreeData
+        - lf.t0, lf.t1, ... → single-molecule TreeData
 
         Examples:
-            lf.csc       # Same as lf.trees['sc']
-            lf.c0        # Same as lf.trees['sm_0']
-            lf.tsc       # Same as lf.get_tdata('sc')
-            lf.t0        # Same as lf.get_tdata('sm_0')
+            lf.csc       # lf.trees['sc']
+            lf.c0        # lf.trees['sm_0']
+            lf.gsc       # lf.get_graph('sc')
+            lf.g0        # lf.get_graph('sm_0')
+            lf.tsc       # lf.get_tdata('sc')
+            lf.t0        # lf.get_tdata('sm_0')
         """
         # CassiopeiaTree access
         if name == 'csc':
             return self.trees.get('sc')
 
         if name.startswith('c') and len(name) > 1 and name[1:].isdigit():
-            tree_id = name[1:]  # 'c0' → '0'
+            tree_id = name[1:]
             return self.trees.get(f'sm_{tree_id}')
 
-        # TreeData access (lazy loading)
+        # NetworkX graph access
+        if name == 'gsc':
+            return self.get_graph('sc')
+
+        if name.startswith('g') and len(name) > 1 and name[1:].isdigit():
+            tree_id = name[1:]
+            return self.get_graph(f'sm_{tree_id}')
+
+        # TreeData access
         if name == 'tsc':
             return self.get_tdata('sc')
 
         if name.startswith('t') and len(name) > 1 and name[1:].isdigit():
-            tree_id = name[1:]  # 't0' → '0'
+            tree_id = name[1:]
             return self.get_tdata(f'sm_{tree_id}')
 
         raise AttributeError(
@@ -79,7 +97,7 @@ class LineageForest:
     def reset(self):
         """Clear all trees and reset counters."""
         self.trees.clear()
-        self.tdatas.clear()
+        self._tdata_cache.clear()
         self.uns.clear()
         self._sm_counter = 0 
 
@@ -106,15 +124,54 @@ class LineageForest:
         """ Get single-molecule tree by ID """
         return self.get_tree(f'sm_{intbc_id}')
 
-    def get_tdata(self, tree_key: str, alignment: str = "subset") -> TreeData | None:
-        """Get TreeData for tree, creating on-demand if needed.
+    def get_graph(self, tree_key: str, copy: bool = False) -> nx.DiGraph | None:
+        """Get networkx graph from CassiopeiaTree.
+
+        By default returns reference to internal network for in-place modifications.
+        Set copy=True to get a snapshot.
 
         Parameters
         ----------
-        tree_key
+        tree_key : str
             Tree identifier (e.g., 'sc', 'sm_0')
-        alignment
-            Alignment mode for TreeData if creating new
+        copy : bool
+            If True, return copy. If False, return reference to internal network.
+
+        Returns
+        -------
+        nx.DiGraph or None
+            NetworkX graph if tree exists, None otherwise
+
+        Examples
+        --------
+        graph = lf.get_graph('sc')
+        graph.nodes['node1']['color'] = 'red'  # Persists in CassiopeiaTree
+
+        snapshot = lf.get_graph('sc', copy=True)  # Read-only snapshot
+        """
+        tree = self.trees.get(tree_key)
+        if tree is not None:
+            if copy:
+                return tree.get_tree_topology()
+            else:
+                # Access internal network directly for in-place modifications
+                return tree._CassiopeiaTree__network
+        return None
+
+    def get_tdata(self, tree_key: str, alignment: str = "subset", refresh: bool = False) -> TreeData | None:
+        """Get TreeData for visualization, creating/caching on-demand.
+
+        TreeData is ephemeral cache synced from CassiopeiaTree topology.
+        Use refresh=True to rebuild TreeData after modifying graphs.
+
+        Parameters
+        ----------
+        tree_key : str
+            Tree identifier (e.g., 'sc', 'sm_0')
+        alignment : str
+            Alignment mode for TreeData
+        refresh : bool
+            Force refresh from CassiopeiaTree
 
         Returns
         -------
@@ -122,23 +179,44 @@ class LineageForest:
 
         Examples
         --------
-        tdata = lf.get_tdata('sc')  # Creates if doesn't exist
-        tdata = lf.get_tdata('sm_0')
+        tdata = lf.get_tdata('sc')
+        tdata = lf.get_tdata('sc', refresh=True)
         """
-        # Return if already exists
-        if tree_key in self.tdatas:
-            return self.tdatas[tree_key]
+        # Return cached if exists and not refreshing
+        if tree_key in self._tdata_cache and not refresh:
+            return self._tdata_cache[tree_key]
 
-        # Create on-demand if tree exists
+        # Create from CassiopeiaTree if tree exists
         if tree_key in self.trees:
             self._sync_tdatas_from_trees(
                 tree_keys=[tree_key],
                 alignment=alignment,
-                overwrite=False
+                overwrite=True
             )
-            return self.tdatas.get(tree_key)
+            return self._tdata_cache.get(tree_key)
 
         return None
+
+    def invalidate_tdata_cache(self, tree_key: str | None = None) -> None:
+        """Clear TreeData cache.
+
+        Call after modifying graphs to force TreeData regeneration on next access.
+
+        Parameters
+        ----------
+        tree_key : str or None
+            Specific tree to invalidate, or None to clear all
+
+        Examples
+        --------
+        lf.gsc.nodes['node1']['color'] = 'red'
+        lf.invalidate_tdata_cache('sc')
+        lf.invalidate_tdata_cache()  # Clear all
+        """
+        if tree_key:
+            self._tdata_cache.pop(tree_key, None)
+        else:
+            self._tdata_cache.clear()
 
     def get_character_matrix(self, tree_key: str):
         """Get character matrix from CassiopeiaTree.
@@ -272,7 +350,7 @@ class LineageForest:
     @property
     def tree_keys(self) -> list[str]:
         """ All tree keys """
-        return list(self.trees.keys())
+        return sorted(list(self.trees.keys()))
 
     @property
     def smtrees_keys(self) -> list[int | str]:
@@ -287,6 +365,29 @@ class LineageForest:
         """ Returns key:value pairs only for sm trees """
         return [(k, v) for k, v in self.trees.items() if k.startswith('sm')]
 
+    @property
+    def tdatas(self):
+        """TreeData cache for all trees (lazy-loaded).
+
+        Returns dict-like object with TreeData for visualization.
+        """
+        # Auto-create for all trees
+        for tree_key in self.trees.keys():
+            if tree_key not in self._tdata_cache:
+                self.get_tdata(tree_key)
+        return self._tdata_cache
+
+    @property
+    def tdatas_values(self):
+        """Returns all TreeData objects for iteration.
+        """
+        return self.tdatas.values()
+    
+    @property
+    def trees_values(self):
+        """Returns all CassiopeiaTree objects for iteration.
+        """
+        return self.trees.values()
 
     @property
     def intbc_ids(self) -> list[int]:
@@ -318,37 +419,36 @@ class LineageForest:
             alignment: str = "subset",
             overwrite: bool = False
             ) -> None:
-        """Populate tdatas from trees.
+        """Sync TreeData cache from CassiopeiaTree topologies.
 
-          Creates TreeData objects from CassiopeiaTree topologies.
-          Note: Character matrices remain with CassiopeiaTree (use get_character_matrix).
+          Creates TreeData objects from CassiopeiaTree topologies for visualization.
+          Character matrices are transferred to TreeData.obsm['characters'] for leaves.
+          All TreeData objects use fixed "tree" key in obst.
 
           Parameters
           ----------
-          tree_keys
+          tree_keys : list[str] or None
               Specific tree keys to sync. If None, syncs all trees.
-          alignment
-              Alignment mode for TreeData ('subset', 'intersect', etc.)
-          overwrite
+          alignment : str
+              Alignment mode for TreeData
+          overwrite : bool
               If True, replace existing TreeData. If False, skip existing.
 
           Examples
           --------
-          # Sync all trees
           lf._sync_tdatas_from_trees()
-
-          # Sync only new trees
           lf._sync_tdatas_from_trees(overwrite=False)
-
-          # Sync specific trees
           lf._sync_tdatas_from_trees(tree_keys=['sc', 'sm_0'])
         """
+        import pycea
+        import pandas as pd
+
         if tree_keys is None:
             tree_keys = list(self.trees.keys())
 
         for tree_key in tree_keys:
             # Skip if already exists and not overwriting
-            if tree_key in self.tdatas and not overwrite:
+            if tree_key in self._tdata_cache and not overwrite:
                 continue
 
             tree = self.trees.get(tree_key)
@@ -356,25 +456,32 @@ class LineageForest:
                 continue
 
             # Create TreeData from CassiopeiaTree topology
-            # Note: Character matrices stay with CassiopeiaTree (different dimensions)
-            # Check if tree has been solved (has topology)
+            # get_tree_topology() returns a copy that preserves all node/edge attributes
             try:
                 topology = tree.get_tree_topology()
                 if topology is not None and len(topology.nodes()) > 0:
                     tdata = TreeData(
-                        obst={tree_key: topology},
+                        obst={"tree": topology},
                         alignment=alignment
                     )
-                    self.tdatas[tree_key] = tdata
-            except Exception as e:
-                # Tree not solved yet, skip silently
+                    pycea.pp.add_depth(tdata)
+
+                    # Transfer character matrix to TreeData if available
+                    if tree.character_matrix is not None and len(tree.character_matrix) > 0:
+                        # Character matrix only has leaves - reindex to match tdata.obs (all nodes)
+                        # Missing nodes (internal nodes) will have NaN values
+                        char_matrix_aligned = tree.character_matrix.reindex(tdata.obs.index)
+                        tdata.obsm['characters'] = char_matrix_aligned
+
+                    self._tdata_cache[tree_key] = tdata
+            except Exception:
                 continue
 
     def _clear_tdatas(self) -> None:
-        """Clear all TreeData objects."""
-        self.tdatas.clear()
+        """Clear all TreeData cache."""
+        self._tdata_cache.clear()
 
     def _remove_tdata(self, tree_key: str) -> None:
-        """Remove TreeData for specific tree."""
-        if tree_key in self.tdatas:
-            del self.tdatas[tree_key]
+        """Remove TreeData from cache."""
+        if tree_key in self._tdata_cache:
+            del self._tdata_cache[tree_key]

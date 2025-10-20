@@ -712,8 +712,24 @@ class TreeNodeMatcher:
                 # Normalized distance ranges from 0 to 1
                 similarity = max(0.0, 1.0 - result)
         else:
-            # Already a similarity metric
-            similarity = result
+            # Similarity metric - but may need normalization!
+            if self._dissimilarity_function_name == 'hamming_similarity_without_missing':
+                # Returns raw count of matching non-missing positions
+                # Need to normalize by number of comparable (non-missing in both) positions
+                # Count comparable positions (non-missing in both sequences)
+                if isinstance(states1_input, np.ndarray):
+                    comparable = np.sum((states1_input != self.missing_state_indicator) &
+                                      (states2_input != self.missing_state_indicator))
+                else:
+                    comparable = sum(1 for s1, s2 in zip(states1_input, states2_input)
+                                   if s1 != self.missing_state_indicator and s2 != self.missing_state_indicator)
+                similarity = result / comparable if comparable > 0 else 0.0
+            elif self._dissimilarity_function_name == 'hamming_similarity_normalized_over_missing':
+                # Already normalized (divides by comparable positions internally)
+                similarity = result
+            else:
+                # Already normalized (e.g., weighted_hamming_similarity, exponential_negative_hamming_distance)
+                similarity = result
 
         logger.debug(f"{similarity=}")
         return similarity

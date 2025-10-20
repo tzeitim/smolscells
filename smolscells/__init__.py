@@ -1,7 +1,8 @@
 import logging
 
 from . import sim
-from .lineage_treedata import LineageForest
+#from .lineage_treedata import LineageForest
+from .lineage_forest import LineageForest
 from .sim import SimulatedLineageForest, simulate_lineage_experiment
 from . import tree_node_matching as tnm
 

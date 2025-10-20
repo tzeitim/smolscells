@@ -111,7 +111,7 @@ def split_single_molecule_data(
         intbc_matrix = intbc_data.loc[sampled_cells].copy()
         intbc_matrix.columns = [f'site_{i}' for i in range(size_of_cassette)]
 
-        single_molecule_data[str(intbc_idx)] = intbc_matrix
+        single_molecule_data[str(intbc_idx).zfill(2)] = intbc_matrix
         logger.info(f"Generated intBC {intbc_idx} dataset: {intbc_matrix.shape}")
 
     logger.info(f"Generated {len(single_molecule_data)} single-molecule datasets")

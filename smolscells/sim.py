@@ -14,10 +14,12 @@ logger = logging.getLogger(__name__)
 
 import numpy as np
 import pandas as pd
+import yaml
 from cassiopeia.data import CassiopeiaTree
 from cassiopeia.simulator import Cas9LineageTracingDataSimulator, BirthDeathFitnessSimulator
 
-from .lineage_treedata import LineageForest
+from .lineage_treedata import LineageForest as LFold
+from .lineage_forest import LineageForest
 from .sampling import (
     mutually_exclusive_sampling,
     split_single_molecule_data,
@@ -143,7 +145,49 @@ class SimulatedLineageForest:
     >>>
     >>> # Compare to ground truth
     >>> print(sim.gt_tree)
+    >>>
+    >>> # From config files
+    >>> sim = SimulatedLineageForest(
+    ...     conf_gt='configs/gt.yaml',
+    ...     conf_exp='configs/exp.yaml'
+    ... )
+    >>> # Or from master config
+    >>> sim = SimulatedLineageForest.from_config('configs/master.yaml')
     """
+
+    @staticmethod
+    def _load_config(config: Path | dict | None, default: dict | None = None) -> dict:
+        """Load configuration from file or dict.
+
+        Parameters
+        ----------
+        config
+            Configuration as dict or path to YAML file
+        default
+            Default configuration if config is None
+
+        Returns
+        -------
+        Configuration dict
+        """
+        if config is None:
+            return default if default is not None else {}
+
+        if isinstance(config, dict):
+            return config
+
+        # Load from file
+        config_path = Path(config)
+        if not config_path.exists():
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+
+        with open(config_path, 'r') as f:
+            loaded = yaml.safe_load(f)
+
+        if not isinstance(loaded, dict):
+            raise ValueError(f"Config file must contain a dict, got {type(loaded)}")
+
+        return loaded
 
     def __init__(
         self,
@@ -159,23 +203,27 @@ class SimulatedLineageForest:
         Parameters
         ----------
         conf_gt
-            Ground truth simulation config
+            Ground truth config (dict or path to YAML file)
         conf_exp
-            Experimental recording config
+            Experimental recording config (dict or path to YAML file)
         conf_dropout
-            Dropout config
+            Dropout config (dict or path to YAML file)
         conf_solver
-            Solver config
+            Solver config (dict or path to YAML file)
         missing_data
             Whether to enable missing data in default configs
         """
-        # Configuration
-        self.conf_gt = conf_gt if conf_gt is not None else return_default_conf_gt()
-        self.conf_exp = conf_exp if conf_exp is not None else return_default_conf_exp(missing_data)
-        self.conf_dropout = (
-            conf_dropout if conf_dropout is not None else return_default_conf_dropout(missing_data)
+        # Load and store configurations
+        self.conf_gt = self._load_config(conf_gt, return_default_conf_gt())
+        self.conf_exp = self._load_config(conf_exp, return_default_conf_exp(missing_data))
+        self.conf_dropout = self._load_config(
+            conf_dropout, return_default_conf_dropout(missing_data)
         )
-        self.solver = conf_solver if conf_solver is not None else return_default_conf_solver()
+        self.solver = (
+            self._load_config(conf_solver, None)
+            if conf_solver is not None
+            else return_default_conf_solver()
+        )
 
         # Ground truth
         self.gt_tree: CassiopeiaTree | None = None
@@ -191,32 +239,139 @@ class SimulatedLineageForest:
         self.sm_mats: dict | None = None
 
         # Observational data container
-        self.lf = LineageForest(alignment="subset")
+        #self.lf = LineageForest(alignment="subset")
+        self.lf = LineageForest()
 
         # CassiopeiaTree objects for solving
         self._sc_tree: CassiopeiaTree | None = None
         self._sm_trees: dict[str, CassiopeiaTree] = {}
 
+    def __repr__(self) -> str:
+        gt_tree = self.lf.get_tree('gt', as_cassiopeia=True)
+        exp_tree = self.lf.get_tree('exp_tree', as_cassiopeia=True)
+          
+        # Simulation status
+        has_gt =  gt_tree is not None
+        has_exp = exp_tree is not None
+        has_samples = self.sc_cell_ids is not None
+        has_lf = self.lf is not None and self.lf.n_trees > 0
+
+        if not has_gt:
+            status = "Not simulated"
+        elif not has_exp:
+            status = "Ground truth only"
+        elif not has_samples:
+            status = "Recording done"
+        elif not has_lf:
+            status = "Sampled (not solved)"
+        else:
+            status = "Complete"
+
+        lines = [f"SimulatedLineageForest [{status}]"]
+
+        # Ground truth info
+        if has_gt:
+            n_cells = gt_tree.n_cell if hasattr(gt_tree, 'n_cell') else len(gt_tree.leaves)
+            lines.append(f"  Ground truth: {n_cells} cells")
+
+        # Sampling info
+        if has_samples:
+            n_sc = len(self.sc_cell_ids) if self.sc_cell_ids is not None else 0
+            n_sm = len(self.sm_cell_ids) if self.sm_cell_ids is not None else 0
+            n_intbcs = len(self.sm_mats) if self.sm_mats is not None else 0
+            lines.append(f"  Sampled: {n_sc} SC cells, {n_sm} SM cells ({n_intbcs} intBCs)")
+
+        # LineageForest info
+        if has_lf and self.lf.n_trees > 0:
+            n_solved = len([k for k in self.lf.tree_keys if k not in ('gt', 'exp_tree')])
+            lines.append(f"  Solved trees: {n_solved} ({', '.join(self.lf.tree_keys)})")
+
+        # Config summary
+        if self.conf_gt:
+            n_extant = self.conf_gt.get('num_extant', '?')
+            lines.append(f"  Config: {n_extant} target cells")
+
+        return '\n'.join(lines)
+
+    @classmethod
+    def from_config(
+        cls,
+        config_file: Path | str,
+        missing_data: bool = False
+    ) -> 'SimulatedLineageForest':
+        """Create from master configuration file.
+
+        Parameters
+        ----------
+        config_file
+            Path to master YAML file containing all configs
+        missing_data
+            Whether to enable missing data in default configs
+
+        Returns
+        -------
+        SimulatedLineageForest instance
+
+        Examples
+        --------
+        Master config file structure:
+
+        .. code-block:: yaml
+
+            conf_gt:
+              num_extant: 1000
+              initial_birth_scale: 2
+            conf_exp:
+              number_of_cassettes: 4
+              mutation_rate: 0.1
+            conf_dropout:
+              enabled: true
+              pattern: "per_intbc"
+
+        >>> sim = SimulatedLineageForest.from_config('configs/master.yaml')
+        """
+        config_path = Path(config_file)
+        with open(config_path, 'r') as f:
+            master = yaml.safe_load(f)
+
+        if not isinstance(master, dict):
+            raise ValueError("Master config must be a dict")
+
+        return cls(
+            conf_gt=master.get('conf_gt'),
+            conf_exp=master.get('conf_exp'),
+            conf_dropout=master.get('conf_dropout'),
+            conf_solver=master.get('conf_solver'),
+            missing_data=missing_data
+        )
+
     def simulate_gt(self) -> None:
         """Simulate ground truth tree."""
         if self.gt_tree is None:
             simulator = BirthDeathFitnessSimulator(**self.conf_gt)
-            self.gt_tree = simulator.simulate_tree()
-            logger.info(f"Simulated GT tree with {self.gt_tree.n_cell} cells")
+
+            self.lf.add_tree(tree = simulator.simulate_tree(), tree_key="gt")
+
+            logger.info(f"Simulated GT tree with {self.lf.get_tree('gt').n_cell} cells")
         else:
             logger.warning("GT tree already exists")
 
     def simulate_recording(self) -> None:
         """Simulate lineage recording on ground truth."""
-        if self.gt_tree is None:
+        gt_tree = self.lf.get_tree("gt") 
+        if gt_tree is None:
             raise ValueError("Must simulate ground truth first (call simulate_gt)")
 
         exp_simulator = Cas9LineageTracingDataSimulator(**self.conf_exp)
-        exp_simulator.overlay_data(self.gt_tree)
+        exp_simulator.overlay_data(gt_tree)
 
-        self.exp_tree = CassiopeiaTree(
-            character_matrix=self.gt_tree.character_matrix, missing_state_indicator=-1
-        )
+        self.lf.add_tree(tree_key="exp_tree", 
+                         tree =CassiopeiaTree(
+                                character_matrix=gt_tree.character_matrix, 
+                                missing_state_indicator=-1
+                                )
+         )
+ 
         logger.info("Simulated lineage recording")
 
 
@@ -231,12 +386,12 @@ class SimulatedLineageForest:
         sm_rate
             Fraction of cells to sample for single-molecule
         """
-        if self.exp_tree is None:
+        if self.lf.trees['exp_tree'] is None:
             raise ValueError("Must simulate recording first (call simulate_recording)")
 
         # Sample from experimental tree
         sc_matrix, sm_matrix, sc_cell_ids, sm_cell_ids = mutually_exclusive_sampling(
-            character_matrix=self.exp_tree.character_matrix,
+            character_matrix=self.lf.get_tree('exp_tree').character_matrix,
             sc_rate=sc_rate,
             sm_rate=sm_rate,
         )
@@ -252,9 +407,10 @@ class SimulatedLineageForest:
         )
 
         # Create CassiopeiaTree objects for single-molecule data
-        for k, v in self.sm_mats.items():
-            self._sm_trees[k] = CassiopeiaTree(character_matrix=v)
-        logger.info(f"Created {len(self._sm_trees)} single-molecule trees")
+        for matrix in self.sm_mats.values():
+            self.lf.add_sm_tree(tree=CassiopeiaTree(character_matrix=matrix))
+
+        logger.info(f"Created {len(self.lf.smtrees_keys)} single-molecule trees")
 
         # Compute dropout stats
         cmultipliers, intdbrates = compute_single_cell_dropout(
@@ -272,7 +428,7 @@ class SimulatedLineageForest:
         )
 
         # Create CassiopeiaTree object for single-cell data
-        self._sc_tree = CassiopeiaTree(character_matrix=self.sc_matrix_masked)
+        self.lf.add_sc_tree(tree = CassiopeiaTree(character_matrix=self.sc_matrix_masked))
 
         logger.info(
             f"Sampled {len(self.sc_cell_ids)} cells (SC) and "
@@ -305,74 +461,20 @@ class SimulatedLineageForest:
         # Solve single-cell tree
         if fraction in ['all', 'sc']:
             logger.info("Solving single-cell tree")
-            self.solver.solve(self._sc_tree, collapse_mutationless_edges=collapse_mutationless_edges)
-
-            # Import SC tree into LineageForest (creates or replaces)
-            if self.lf.n_obs == 0:
-                # Create new LineageForest from SC tree
-                self.lf = LineageForest.from_cassiopeia_tree(
-                    self._sc_tree,
-                    tree_type='sc',
-                    alignment="subset"
-                )
-            else:
-                # Add SC tree to existing forest
-                self.lf.add_cassiopeia_tree(
-                    self._sc_tree,
-                    tree_type='sc'
-                )
-            logger.info("Solved and added single-cell tree")
+            self.solver.solve(self.lf.get_sc_tree(), collapse_mutationless_edges=collapse_mutationless_edges)
+            logger.info("Added single-cell tree")
 
         # Solve single-molecule trees
         if fraction in ['all', 'sm']:
-            for intbc_key, sm_tree in self._sm_trees.items():
-                # Extract integer intbc_id from key (e.g., 'intbc_0' -> 0)
-                if isinstance(intbc_key, str) and intbc_key.startswith('intbc_'):
-                    intbc_id = int(intbc_key.replace('intbc_', ''))
-                else:
-                    # If already an integer or simple string number
-                    intbc_id = int(intbc_key)
-
-                logger.info(f"Solving single-molecule tree {intbc_id}")
+            for intbc_key, sm_tree in self.lf.smtrees_items:
+                logger.info(f"Solving single-molecule tree {intbc_key}")
                 self.solver.solve(sm_tree, collapse_mutationless_edges=collapse_mutationless_edges)
-
-                # Import SM tree into LineageForest
-                if self.lf.n_obs == 0:
-                    # Create new LineageForest from first SM tree
-                    self.lf = LineageForest.from_cassiopeia_tree(
-                        sm_tree,
-                        tree_type='sm',
-                        intbc_id=intbc_id,
-                        alignment="subset"
-                    )
-                else:
-                    # Add SM tree to existing forest
-                    self.lf.add_cassiopeia_tree(
-                        sm_tree,
-                        tree_type='sm',
-                        intbc_id=intbc_id
-                    )
-                logger.info(f"Solved and added SM tree {intbc_id}")
+                logger.info(f"Solved and added SM tree {intbc_key}")
 
         # Solve experimental tree (full tree before sampling)
         if fraction in ['exp_tree']:
             logger.info("Solving experimental tree")
-            self.solver.solve(self.exp_tree, collapse_mutationless_edges=collapse_mutationless_edges)
-
-            # Add as special tree (keep as 'exp_tree' in obst, but treat as SC type)
-            if self.lf.n_obs == 0:
-                self.lf = LineageForest.from_cassiopeia_tree(
-                    self.exp_tree,
-                    tree_type='sc',
-                    tree_key='exp_tree',
-                    alignment="subset"
-                )
-            else:
-                self.lf.add_cassiopeia_tree(
-                    self.exp_tree,
-                    tree_type='sc',
-                    tree_key='exp_tree'
-                )
+            self.solver.solve(self.lf.get_tree('exp_tree'), collapse_mutationless_edges=collapse_mutationless_edges)
             logger.info("Solved and added experimental tree")
 
     def simulate(
@@ -398,10 +500,13 @@ class SimulatedLineageForest:
         collapse_mutationless_edges
             Whether to collapse mutationless edges
         """
+        self.lf.reset()
         self.simulate_gt()
         self.simulate_recording()
+        self.lf.initialize_tdatas()
         self.sample_fractions(sc_rate=sc_rate, sm_rate=sm_rate)
         self.solve_fractions(solver=solver, collapse_mutationless_edges=collapse_mutationless_edges)
+        print(self.lf)
 
     # ═══════════════════════════════════════════════════════════
     # I/O

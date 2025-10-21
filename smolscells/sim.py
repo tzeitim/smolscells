@@ -473,6 +473,7 @@ class SimulatedLineageForest:
 
         logger.info(f"Collapsing to alleles for: {tree_keys}")
         self.lf_allele = self.lf.collapse_to_alleles(tree_keys=tree_keys)
+        self.lf_allele.is_collapsed = True
 
         for tree_key in tree_keys:
             metrics = self.lf_allele.get_allele_metrics(tree_key)

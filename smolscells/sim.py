@@ -491,9 +491,8 @@ class SimulatedLineageForest:
         """
         Expand allele-level trees back to cell-level.
 
-        Expands sim.lf (allele-level) back to cells using mappings stored in sim.lf.
-        The cell-level forest is stored in sim.lf_allele, and after expansion,
-        sim.lf contains cell-level trees while sim.lf_allele keeps the allele version.
+        Expands sim.lf (allele-level) back to cells using stored character matrices.
+        After expansion, sim.lf contains cell-level trees.
 
         Parameters
         ----------
@@ -505,8 +504,8 @@ class SimulatedLineageForest:
 
         logger.info(f"Expanding alleles back to cells for: {tree_keys}")
 
-        # lf_allele has original cell-level data, lf has solved allele-level data
-        expanded_lf = self.lf_allele.expand_to_cells(self.lf, tree_keys=tree_keys)
+        # lf is allele-level with stored character matrices
+        expanded_lf = self.lf.expand_to_cells(tree_keys=tree_keys)
 
         # Replace lf with expanded cell-level forest
         self.lf = expanded_lf
@@ -516,15 +515,11 @@ class SimulatedLineageForest:
         fraction: str = "all",
         solver: str | None = None,
         collapse_mutationless_edges: bool = True,
-        use_allele_workflow: bool | None = None,
-        auto_expand: bool = False,
     ) -> None:
         """
         Solve (reconstruct) trees for sampled fractions.
 
         Populates the lf with solved trees and character matrices.
-        If use_allele_workflow is enabled, collapses to alleles before solving
-        and optionally expands back to cells after solving.
 
         Parameters
         ----------
@@ -534,9 +529,6 @@ class SimulatedLineageForest:
             Solver name (if None, uses self.solver)
         collapse_mutationless_edges
             Whether to collapse mutationless edges
-        use_allele_workflow
-            Whether to use allele-based workflow for this solve.
-            If None, uses self.use_allele_workflow (default from __init__)
         auto_expand
             If True, automatically expands alleles back to cells after solving.
             If False, leaves trees at allele level (work with sim.lf_allele).
@@ -554,72 +546,22 @@ class SimulatedLineageForest:
         if solver is not None:
             self.solver = solvers.get_solver_class(solver)
 
-        # Use parameter value if provided, otherwise fall back to instance attribute
-        if use_allele_workflow is None:
-            use_allele_workflow = self.use_allele_workflow
 
-        if use_allele_workflow:
-            logger.info("Using allele-based workflow")
+        if fraction in ['all', 'sc']:
+            logger.info("Solving single-cell tree")
+            self.solver.solve(self.lf.get_sc_tree(), collapse_mutationless_edges=collapse_mutationless_edges)
+            logger.info("Added single-cell tree")
 
-            tree_keys = []
-            if fraction in ['all', 'sc']:
-                tree_keys.append('sc')
-            if fraction in ['all', 'sm']:
-                tree_keys.extend(self.lf.smtrees_keys)
-            if fraction in ['all', 'exp_tree']:
-                tree_keys.append('exp_tree')
+        if fraction in ['all', 'sm']:
+            for intbc_key, sm_tree in self.lf.smtrees_items:
+                logger.info(f"Solving single-molecule tree {intbc_key}")
+                self.solver.solve(sm_tree, collapse_mutationless_edges=collapse_mutationless_edges)
+                logger.info(f"Solved and added SM tree {intbc_key}")
 
-            # Store original cell-level forest in lf_allele (for later expansion)
-            self.lf_allele = self.lf
-
-            logger.info(f"Collapsing to alleles for: {tree_keys}")
-            # Replace lf with allele-level forest
-            self.lf = self.lf_allele.collapse_to_alleles(tree_keys=tree_keys)
-
-            for tree_key in tree_keys:
-                metrics = self.lf.get_allele_metrics(tree_key)
-                if metrics:
-                    logger.info(
-                        f"{tree_key}: {metrics['total_cells']} cells → "
-                        f"{metrics['total_alleles']} alleles "
-                        f"({metrics['compression_ratio']:.1f}x compression)"
-                    )
-
-            if fraction in ['all', 'sc'] and 'sc' in tree_keys:
-                logger.info("Solving single-cell tree at allele level")
-                self.solver.solve(
-                    self.lf.get_sc_tree(),
-                    collapse_mutationless_edges=collapse_mutationless_edges
-                )
-
-            if fraction in ['all', 'sm']:
-                for intbc_key, sm_tree in self.lf.smtrees_items:
-                    logger.info(f"Solving single-molecule tree {intbc_key} at allele level")
-                    self.solver.solve(sm_tree, collapse_mutationless_edges=collapse_mutationless_edges)
-
-            if fraction in ['exp_tree'] and 'exp_tree' in tree_keys:
-                logger.info("Solving experimental tree at allele level")
-                self.solver.solve(
-                    self.lf.get_tree('exp_tree'),
-                    collapse_mutationless_edges=collapse_mutationless_edges
-                )
-
-        else:
-            if fraction in ['all', 'sc']:
-                logger.info("Solving single-cell tree")
-                self.solver.solve(self.lf.get_sc_tree(), collapse_mutationless_edges=collapse_mutationless_edges)
-                logger.info("Added single-cell tree")
-
-            if fraction in ['all', 'sm']:
-                for intbc_key, sm_tree in self.lf.smtrees_items:
-                    logger.info(f"Solving single-molecule tree {intbc_key}")
-                    self.solver.solve(sm_tree, collapse_mutationless_edges=collapse_mutationless_edges)
-                    logger.info(f"Solved and added SM tree {intbc_key}")
-
-            if fraction in ['exp_tree']:
-                logger.info("Solving experimental tree")
-                self.solver.solve(self.lf.get_tree('exp_tree'), collapse_mutationless_edges=collapse_mutationless_edges)
-                logger.info("Solved and added experimental tree")
+        if fraction in ['exp_tree']:
+            logger.info("Solving experimental tree")
+            self.solver.solve(self.lf.get_tree('exp_tree'), collapse_mutationless_edges=collapse_mutationless_edges)
+            logger.info("Solved and added experimental tree")
 
     def simulate(
         self,
@@ -627,6 +569,7 @@ class SimulatedLineageForest:
         sm_rate: float = 0.5,
         solver: str | None = None,
         collapse_mutationless_edges: bool = True,
+        use_allele_workflow: bool = True,
     ) -> None:
         """
         Run complete simulation workflow.
@@ -644,11 +587,19 @@ class SimulatedLineageForest:
         collapse_mutationless_edges
             Whether to collapse mutationless edges
         """
+        if use_allele_workflow is None:
+            use_allele_workflow = self.use_allele_workflow
+
         self.lf.reset()
         self.simulate_gt()
         self.simulate_recording()
-        self.lf.initialize_tdatas()
         self.sample_fractions(sc_rate=sc_rate, sm_rate=sm_rate)
+
+        if use_allele_workflow:
+            self.collapse_to_alleles()
+            self.lf = self.lf_allele
+
+        self.lf.initialize_tdatas()
         self.solve_fractions(solver=solver, collapse_mutationless_edges=collapse_mutationless_edges)
         self.lf._sync_tdatas_from_trees()
         print(self.lf)

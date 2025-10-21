@@ -36,12 +36,14 @@ class LineageForest:
 
     def __repr__(self) -> str:
         has_tdatas = f"  TreeData cache: {len(self._tdata_cache)} ({', '.join(self._tdata_cache.keys())})\n" if self._tdata_cache else ""
+        not_collapsed = " not" if not self.is_collapsed else ""
 
         return (
             f"LineageForest\n"
             f"  Trees: {len(self.trees)} ({', '.join(self.tree_keys)})\n"
             f"{has_tdatas}"
-            f"  Shared data: {self.shared_tdata is not None}"
+            f"  Shared data: {self.shared_tdata is not None}\n"
+            f"  Is{not_collapsed} collapsed"
         )
 
     def __getattr__(self, name: str):
@@ -521,6 +523,8 @@ class LineageForest:
                     'cell_to_allele': cell_to_allele,
                     'allele_sizes': allele_sizes,
                     'allele_id_to_hash': allele_id_to_hash,
+                    'original_character_matrix': char_matrix,  # Store for self-contained expansion
+                    'missing_state_indicator': tree.missing_state_indicator,
                     'metrics': {
                         'total_cells': total_cells,
                         'total_alleles': total_alleles,
@@ -534,19 +538,16 @@ class LineageForest:
 
     def expand_to_cells(
         self,
-        allele_lf: "LineageForest",
         tree_keys: list[str] | None = None,
         add_metadata: bool = True
     ) -> "LineageForest":
         """Expand allele-level trees back to cell-level.
 
-        Takes solved allele trees and expands each allele leaf into its constituent
-        cells as a direct polytomy. Internal nodes are preserved unchanged.
+        Self-contained method that uses stored character matrices from collapse.
+        Call this on an allele-level LineageForest to expand back to cells.
 
         Parameters
         ----------
-        allele_lf : LineageForest
-            Solved allele-level LineageForest (from collapse_to_alleles)
         tree_keys : list[str] or None
             Trees to expand. If None, expands all trees.
         add_metadata : bool
@@ -561,7 +562,7 @@ class LineageForest:
         --------
         allele_lf = lf.collapse_to_alleles()
         # ... solve trees at allele level ...
-        cell_lf = lf.expand_to_cells(allele_lf)
+        cell_lf = allele_lf.expand_to_cells()
 
         Access cell metadata:
         tree = cell_lf.get_graph('sc')
@@ -573,24 +574,30 @@ class LineageForest:
         import copy
 
         if tree_keys is None:
-            tree_keys = list(allele_lf.trees.keys())
+            tree_keys = list(self.trees.keys())
 
         cell_lf = LineageForest(shared_tdata=self.shared_tdata)
-        cell_lf.uns = allele_lf.uns.copy()
+        cell_lf.uns = self.uns.copy()
 
         for tree_key in tree_keys:
-            allele_tree = allele_lf.trees.get(tree_key)
+            allele_tree = self.trees.get(tree_key)
             if allele_tree is None:
                 continue
 
-            allele_info = allele_lf.uns.get('allele_info', {}).get(tree_key, {})
+            allele_info = self.uns.get('allele_info', {}).get(tree_key, {})
             allele_to_cells = allele_info.get('allele_to_cells', {})
             allele_id_to_hash = allele_info.get('allele_id_to_hash', {})
             allele_sizes = allele_info.get('allele_sizes', {})
 
-            original_tree = self.trees.get(tree_key)
-            if original_tree is None or original_tree.character_matrix is None:
-                continue
+            # Get original character matrix from stored data
+            char_matrix = allele_info.get('original_character_matrix')
+            missing_state_indicator = allele_info.get('missing_state_indicator', -1)
+
+            if char_matrix is None:
+                raise ValueError(
+                    f"Cannot expand tree '{tree_key}': no original character matrix found. "
+                    "Make sure collapse_to_alleles was called with store_mappings=True."
+                )
 
             allele_graph = allele_tree.get_tree_topology()
             cell_graph = nx.DiGraph()
@@ -631,9 +638,9 @@ class LineageForest:
                         cell_graph.add_edge(parent, node, **edge_attrs)
 
             cell_tree = CassiopeiaTree(
-                character_matrix=original_tree.character_matrix.copy(),
+                character_matrix=char_matrix.copy(),
                 tree=cell_graph,
-                missing_state_indicator=original_tree.missing_state_indicator
+                missing_state_indicator=missing_state_indicator
             )
 
             cell_lf.add_tree(tree_key, cell_tree)

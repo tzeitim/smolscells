@@ -949,7 +949,8 @@ class TreeNodeMatcher:
                                            source_tree_name: Optional[str] = None,
                                            target_tree_name: Optional[str] = None,
                                            min_children_fraction: float = 0.5,
-                                           return_all_matches: bool = False) -> Union[Dict[Any, Any], Dict[Any, NodeMatch]]:
+                                           return_all_matches: bool = False,
+                                           export_debug_df: bool = False) -> Union[Dict[Any, Any], Dict[Any, NodeMatch], tuple]:
         """
         Match trees based on character similarity without requiring leaf name overlap.
 
@@ -964,24 +965,61 @@ class TreeNodeMatcher:
             target_tree_name: Name of target tree (for intBC extraction)
             min_children_fraction: Minimum fraction of children that must match for internal node match
             return_all_matches: If True, return full NodeMatch objects
+            export_debug_df: If True, return (matches, debug_df) tuple with detailed match info
 
         Returns:
             Dictionary mapping source nodes to target nodes (or NodeMatch objects)
+            Or tuple of (matches, debug_df) if export_debug_df=True
         """
         import logging
+        import polars as pl
         logger = logging.getLogger(__name__)
 
         logger.debug(f"Character-based matching: {len(source_tree.leaves)} source leaves → {len(target_tree.leaves)} target leaves")
+
+        # Initialize debug data collection
+        debug_records = [] if export_debug_df else None
 
         # Phase 1: Leaf-to-leaf matching based on character similarity
         logger.debug("Phase 1: Matching leaves by character similarity...")
         leaf_matches = {}
 
         for source_leaf in source_tree.leaves:
-            best_match, best_score, _ = self.find_best_character_match(
+            best_match, best_score, all_candidates = self.find_best_character_match(
                 source_leaf, source_tree, list(target_tree.leaves), target_tree,
                 source_tree_name, target_tree_name, warn_ambiguous=True
             )
+
+            # Get character states for logging
+            source_states = source_tree.get_character_states(source_leaf)
+            target_states = target_tree.get_character_states(best_match) if best_match else None
+
+            passed = best_match is not None and best_score >= self.threshold_e
+
+            logger.debug(
+                f"  Leaf {source_leaf} {list(source_states)} → "
+                f"{best_match if best_match else 'NO_MATCH'} "
+                f"{list(target_states) if target_states is not None else 'N/A'} "
+                f"(score={best_score:.3f}, threshold={self.threshold_e}, {'✓' if passed else '✗'})"
+            )
+
+            # Collect debug data
+            if export_debug_df:
+                debug_records.append({
+                    'source_tree': source_tree_name,
+                    'target_tree': target_tree_name,
+                    'source_node': str(source_leaf),
+                    'source_type': 'leaf',
+                    'source_states': str(list(source_states)),
+                    'target_node': str(best_match) if best_match else None,
+                    'target_type': 'leaf' if best_match else None,
+                    'target_states': str(list(target_states)) if target_states is not None else None,
+                    'similarity_score': best_score,
+                    'threshold': self.threshold_e,
+                    'matched': passed,
+                    'phase': 'leaf_matching',
+                    'num_candidates': len(all_candidates) if all_candidates else 0,
+                })
 
             if best_match and best_score >= self.threshold_e:
                 leaf_matches[source_leaf] = NodeMatch(
@@ -1058,7 +1096,25 @@ class TreeNodeMatcher:
                 return no_match
 
             elif len(matched_target_nodes) == 1:
-                lca = matched_target_nodes[0]
+                # All children matched to same target node
+                # For internal nodes, this should not match to a leaf - climb to find proper ancestor
+                candidate = matched_target_nodes[0]
+
+                # If all children point to same leaf, reject the match - internal can't match single leaf
+                if target_tree.is_leaf(candidate):
+                    # Reject match: an internal node's children shouldn't all map to same leaf
+                    no_match = NodeMatch(
+                        source_node=node,
+                        target_node=None,
+                        score=match_fraction,
+                        matched_leaves=set(),
+                        character_similarity=None,
+                        metadata={'child_matches': child_matches, 'all_children_same_leaf': True}
+                    )
+                    all_matches[node] = no_match
+                    return no_match
+                else:
+                    lca = candidate
             else:
                 try:
                     lca = target_tree.find_lca(*matched_target_nodes)
@@ -1082,7 +1138,64 @@ class TreeNodeMatcher:
                 node, lca, source_tree, target_tree, source_tree_name, target_tree_name
             )
 
+            # Get states for logging
+            try:
+                source_states = source_tree.get_character_states(node)
+                target_states = target_tree.get_character_states(lca)
+            except:
+                source_states = None
+                target_states = None
+
+            passed = char_similarity >= self.threshold_e
+
+            logger.debug(
+                f"  Internal {node} → {lca} "
+                f"(char_sim={char_similarity:.3f}, threshold={self.threshold_e}, "
+                f"children_frac={match_fraction:.3f}, {'✓' if passed else '✗'})"
+            )
+
+            # Collect debug data
+            if export_debug_df and debug_records is not None:
+                debug_records.append({
+                    'source_tree': source_tree_name,
+                    'target_tree': target_tree_name,
+                    'source_node': str(node),
+                    'source_type': 'internal',
+                    'source_states': str(list(source_states)) if source_states is not None else None,
+                    'target_node': str(lca),
+                    'target_type': 'internal',
+                    'target_states': str(list(target_states)) if target_states is not None else None,
+                    'similarity_score': char_similarity,
+                    'threshold': self.threshold_e,
+                    'matched': passed,
+                    'phase': 'internal_matching',
+                    'num_candidates': 1,
+                    'children_match_fraction': match_fraction,
+                })
+
             if char_similarity >= self.threshold_e:
+                # Additional safety check: internal nodes should NEVER match to leaves
+                if target_tree.is_leaf(lca):
+                    logger.warning(
+                        f"Rejecting internal→leaf match despite passing similarity: "
+                        f"{node} (internal) → {lca} (leaf), similarity={char_similarity:.3f}"
+                    )
+                    no_match = NodeMatch(
+                        source_node=node,
+                        target_node=None,
+                        score=char_similarity,
+                        matched_leaves=set(),
+                        character_similarity=char_similarity,
+                        metadata={
+                            'child_matches': child_matches,
+                            'match_fraction': match_fraction,
+                            'rejected_internal_to_leaf': True,
+                            'rejected_target': lca
+                        }
+                    )
+                    all_matches[node] = no_match
+                    return no_match
+
                 # Match accepted
                 matched_leaves = set()
                 for child_match in child_matches:
@@ -1116,8 +1229,38 @@ class TreeNodeMatcher:
 
         logger.debug(f"Phase 2 complete: {sum(1 for m in all_matches.values() if m.target_node is not None)}/{len(source_tree.nodes)} total nodes matched")
 
+        # Create debug DataFrame if requested
+        debug_df = None
+        if export_debug_df and debug_records:
+            import polars as pl
+            debug_df = pl.DataFrame(debug_records)
+
+            # Check for duplicate target matches
+            if len(debug_df) > 0:
+                matched = debug_df.filter(pl.col('matched') == True)
+                if len(matched) > 0:
+                    duplicates = (matched
+                        .group_by('target_node')
+                        .agg(pl.count().alias('count'))
+                        .filter(pl.col('count') > 1)
+                    )
+                    if len(duplicates) > 0:
+                        logger.warning(f"Found {len(duplicates)} target nodes matched by multiple source nodes!")
+                        for row in duplicates.iter_rows(named=True):
+                            logger.warning(f"  Target {row['target_node']} matched by {row['count']} sources")
+
         # Return format based on parameter
-        if return_all_matches:
+        if export_debug_df:
+            if return_all_matches:
+                return all_matches, debug_df
+            else:
+                matches = {
+                    source: match.target_node
+                    for source, match in all_matches.items()
+                    if match.target_node is not None and match.score >= self.threshold_e
+                }
+                return matches, debug_df
+        elif return_all_matches:
             return all_matches
         else:
             return {

@@ -11,37 +11,44 @@ logger = logging.getLogger(__name__)
 def mutually_exclusive_sampling(
     character_matrix: pd.DataFrame,
     sc_rate: float,
-    sm_rate: float
+    sm_rate: float,
+    random_seed: Optional[int] = None
 ) -> Tuple[pd.DataFrame, pd.DataFrame, List[str], List[str]]:
     """
     Perform mutually exclusive sampling: first sample total pool, then split into SC vs bulk
-    
+
     Args:
         character_matrix: Full character matrix from recorded GT tree
         sc_rate: Single-cell sampling rate
         sm_rate: Single-molecule (bulk) sampling rate
-        
+        random_seed: Random seed for reproducibility
+
     Returns:
         Tuple of (sc_matrix, sm_matrix, sc_cell_ids, sm_cell_ids)
     """
     print(f"Performing mutually exclusive sampling: SC={sc_rate*100}%, SM={sm_rate*100}%")
-    
+
+    # Use seeded random state for reproducibility
+    rng = np.random.RandomState(random_seed)
+    if random_seed is not None:
+        logger.info(f"Using random seed {random_seed} for sampling reproducibility")
+
     total_cells = len(character_matrix)
-    
+
     # Step 1: Sample total pool (sum of fractions)
     total_sample_rate = sc_rate + sm_rate
     n_total_sampled = int(total_cells * total_sample_rate)
-    
+
     # Sample cells for the combined pool
     all_cell_ids = list(character_matrix.index)
-    sampled_cell_ids = np.random.choice(all_cell_ids, size=n_total_sampled, replace=False)
-    
+    sampled_cell_ids = rng.choice(all_cell_ids, size=n_total_sampled, replace=False)
+
     # Step 2: Split sampled pool into SC vs bulk
     sc_fraction_of_sample = sc_rate / total_sample_rate
     n_sc = int(len(sampled_cell_ids) * sc_fraction_of_sample)
 
     # Randomly split the sampled cells (not sequential!)
-    np.random.shuffle(sampled_cell_ids)
+    rng.shuffle(sampled_cell_ids)
     sc_cell_ids = sampled_cell_ids[:n_sc]
     sm_cell_ids = sampled_cell_ids[n_sc:]
     

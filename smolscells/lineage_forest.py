@@ -416,7 +416,7 @@ class LineageForest:
     def _sync_tdatas_from_trees(
             self,
             tree_keys: list[str] | None = None,
-            alignment: str = "subset",
+            alignment: str = "leaves",
             overwrite: bool = False
             ) -> None:
         """Sync TreeData cache from CassiopeiaTree topologies.

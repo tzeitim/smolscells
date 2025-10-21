@@ -391,11 +391,13 @@ class SimulatedLineageForest:
         if self.lf.trees['exp_tree'] is None:
             raise ValueError("Must simulate recording first (call simulate_recording)")
 
-        # Sample from experimental tree
+        # Sample from experimental tree (use GT seed for reproducibility)
+        sampling_seed = self.conf_gt.get('random_seed') if self.conf_gt else None
         sc_matrix, sm_matrix, sc_cell_ids, sm_cell_ids = mutually_exclusive_sampling(
             character_matrix=self.lf.get_tree('exp_tree').character_matrix,
             sc_rate=sc_rate,
             sm_rate=sm_rate,
+            random_seed=sampling_seed,
         )
 
         self.sc_matrix = sc_matrix

@@ -32,6 +32,7 @@ class LineageForest:
         self.uns = {}
         self.shared_tdata = shared_tdata  # Shared data across all observations
         self._sm_counter = 0 # auto-increment counter for sm trees
+        self.is_collapsed = None
 
     def __repr__(self) -> str:
         has_tdatas = f"  TreeData cache: {len(self._tdata_cache)} ({', '.join(self._tdata_cache.keys())})\n" if self._tdata_cache else ""

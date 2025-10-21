@@ -399,6 +399,386 @@ class LineageForest:
         """Number of trees in forest."""
         return len(self.trees)
 
+    def collapse_to_alleles(
+        self,
+        tree_keys: list[str] | None = None,
+        store_mappings: bool = True
+    ) -> "LineageForest":
+        """Collapse cells to alleles based on identical character states.
+
+        Groups cells with identical character states into alleles. Returns a new
+        LineageForest with allele-level character matrices and trees.
+
+        Alleles are identified by their character states:
+        - allele_id: comma-separated string (e.g., '1,2,0,3')
+        - allele_id_hash: MD5 hash (8 chars) for compact display (e.g., 'a3f5b2c9')
+
+        Parameters
+        ----------
+        tree_keys : list[str] or None
+            Trees to collapse. If None, collapses all trees.
+        store_mappings : bool
+            If True, stores mappings and metrics in uns['allele_info']
+
+        Returns
+        -------
+        LineageForest
+            New LineageForest with allele-level data
+
+        Examples
+        --------
+        allele_lf = lf.collapse_to_alleles()
+        allele_lf = lf.collapse_to_alleles(tree_keys=['sc', 'sm_0'])
+
+        Access mappings:
+        allele_to_cells = allele_lf.uns['allele_info']['sc']['allele_to_cells']
+        metrics = allele_lf.uns['allele_info']['sc']['metrics']
+        """
+        from cassiopeia.mixins.utilities import find_duplicate_groups
+        import hashlib
+        import pandas as pd
+
+        if tree_keys is None:
+            tree_keys = list(self.trees.keys())
+
+        allele_lf = LineageForest(shared_tdata=self.shared_tdata)
+        allele_lf.uns = self.uns.copy()
+
+        if store_mappings:
+            allele_lf.uns['allele_info'] = {}
+
+        for tree_key in tree_keys:
+            tree = self.trees.get(tree_key)
+            if tree is None or tree.character_matrix is None:
+                continue
+
+            char_matrix = tree.character_matrix
+
+            allele_groups = find_duplicate_groups(char_matrix)
+
+            allele_to_cells = {}
+            cell_to_allele = {}
+            allele_sizes = {}
+            allele_id_to_hash = {}
+
+            allele_char_states = []
+            allele_ids = []
+
+            cells_in_groups = set()
+            for group_idx, cell_group in enumerate(allele_groups.values()):
+                cells = list(cell_group)
+
+                char_state = tuple(char_matrix.loc[cells[0]].values)
+                allele_id = ",".join(str(int(x)) for x in char_state)
+                allele_id_hash = hashlib.md5(allele_id.encode()).hexdigest()[:8]
+
+                allele_to_cells[allele_id] = cells
+                allele_sizes[allele_id] = len(cells)
+                allele_id_to_hash[allele_id] = allele_id_hash
+
+                for cell in cells:
+                    cell_to_allele[cell] = allele_id
+                    cells_in_groups.add(cell)
+
+                allele_char_states.append(char_state)
+                allele_ids.append(allele_id)
+
+            for cell in char_matrix.index:
+                if cell not in cells_in_groups:
+                    char_state = tuple(char_matrix.loc[cell].values)
+                    allele_id = ",".join(str(int(x)) for x in char_state)
+                    allele_id_hash = hashlib.md5(allele_id.encode()).hexdigest()[:8]
+
+                    allele_to_cells[allele_id] = [cell]
+                    allele_sizes[allele_id] = 1
+                    allele_id_to_hash[allele_id] = allele_id_hash
+                    cell_to_allele[cell] = allele_id
+
+                    allele_char_states.append(char_state)
+                    allele_ids.append(allele_id)
+
+            allele_char_matrix = pd.DataFrame(
+                allele_char_states,
+                index=allele_ids,
+                columns=char_matrix.columns
+            )
+
+            allele_tree = CassiopeiaTree(
+                character_matrix=allele_char_matrix,
+                missing_state_indicator=tree.missing_state_indicator
+            )
+
+            allele_lf.add_tree(tree_key, allele_tree)
+
+            if store_mappings:
+                total_cells = len(char_matrix)
+                total_alleles = len(allele_ids)
+                compression_ratio = total_cells / total_alleles if total_alleles > 0 else 0
+
+                allele_lf.uns['allele_info'][tree_key] = {
+                    'allele_to_cells': allele_to_cells,
+                    'cell_to_allele': cell_to_allele,
+                    'allele_sizes': allele_sizes,
+                    'allele_id_to_hash': allele_id_to_hash,
+                    'metrics': {
+                        'total_cells': total_cells,
+                        'total_alleles': total_alleles,
+                        'compression_ratio': compression_ratio,
+                        'avg_allele_size': total_cells / total_alleles if total_alleles > 0 else 0,
+                        'max_allele_size': max(allele_sizes.values()) if allele_sizes else 0
+                    }
+                }
+
+        return allele_lf
+
+    def expand_to_cells(
+        self,
+        allele_lf: "LineageForest",
+        tree_keys: list[str] | None = None,
+        add_metadata: bool = True
+    ) -> "LineageForest":
+        """Expand allele-level trees back to cell-level.
+
+        Takes solved allele trees and expands each allele leaf into its constituent
+        cells as a direct polytomy. Internal nodes are preserved unchanged.
+
+        Parameters
+        ----------
+        allele_lf : LineageForest
+            Solved allele-level LineageForest (from collapse_to_alleles)
+        tree_keys : list[str] or None
+            Trees to expand. If None, expands all trees.
+        add_metadata : bool
+            If True, adds allele metadata to cell nodes
+
+        Returns
+        -------
+        LineageForest
+            New LineageForest with cell-level data
+
+        Examples
+        --------
+        allele_lf = lf.collapse_to_alleles()
+        # ... solve trees at allele level ...
+        cell_lf = lf.expand_to_cells(allele_lf)
+
+        Access cell metadata:
+        tree = cell_lf.get_graph('sc')
+        tree.nodes['cell_1']['allele_id']
+        tree.nodes['cell_1']['allele_id_hash']
+        tree.nodes['cell_1']['allele_size']
+        tree.nodes['cell_1']['allele_siblings']
+        """
+        import copy
+
+        if tree_keys is None:
+            tree_keys = list(allele_lf.trees.keys())
+
+        cell_lf = LineageForest(shared_tdata=self.shared_tdata)
+        cell_lf.uns = allele_lf.uns.copy()
+
+        for tree_key in tree_keys:
+            allele_tree = allele_lf.trees.get(tree_key)
+            if allele_tree is None:
+                continue
+
+            allele_info = allele_lf.uns.get('allele_info', {}).get(tree_key, {})
+            allele_to_cells = allele_info.get('allele_to_cells', {})
+            allele_id_to_hash = allele_info.get('allele_id_to_hash', {})
+            allele_sizes = allele_info.get('allele_sizes', {})
+
+            original_tree = self.trees.get(tree_key)
+            if original_tree is None or original_tree.character_matrix is None:
+                continue
+
+            allele_graph = allele_tree.get_tree_topology()
+            cell_graph = nx.DiGraph()
+
+            for node in allele_graph.nodes():
+                if node in allele_to_cells:
+                    cells = allele_to_cells[node]
+
+                    parent = list(allele_graph.predecessors(node))
+                    if not parent:
+                        for cell in cells:
+                            cell_graph.add_node(cell, **allele_graph.nodes[node])
+
+                            if add_metadata:
+                                cell_graph.nodes[cell]['allele_id'] = node
+                                cell_graph.nodes[cell]['allele_id_hash'] = allele_id_to_hash.get(node)
+                                cell_graph.nodes[cell]['allele_size'] = allele_sizes.get(node, len(cells))
+                                cell_graph.nodes[cell]['allele_siblings'] = [c for c in cells if c != cell]
+                    else:
+                        parent = parent[0]
+
+                        edge_attrs = allele_graph.edges.get((parent, node), {})
+
+                        for cell in cells:
+                            cell_graph.add_node(cell, **allele_graph.nodes[node])
+                            cell_graph.add_edge(parent, cell, **edge_attrs)
+
+                            if add_metadata:
+                                cell_graph.nodes[cell]['allele_id'] = node
+                                cell_graph.nodes[cell]['allele_id_hash'] = allele_id_to_hash.get(node)
+                                cell_graph.nodes[cell]['allele_size'] = allele_sizes.get(node, len(cells))
+                                cell_graph.nodes[cell]['allele_siblings'] = [c for c in cells if c != cell]
+                else:
+                    cell_graph.add_node(node, **allele_graph.nodes[node])
+
+                    for parent in allele_graph.predecessors(node):
+                        edge_attrs = allele_graph.edges.get((parent, node), {})
+                        cell_graph.add_edge(parent, node, **edge_attrs)
+
+            cell_tree = CassiopeiaTree(
+                character_matrix=original_tree.character_matrix.copy(),
+                tree=cell_graph,
+                missing_state_indicator=original_tree.missing_state_indicator
+            )
+
+            cell_lf.add_tree(tree_key, cell_tree)
+
+        return cell_lf
+
+    def get_allele_metrics(self, tree_key: str | None = None) -> dict:
+        """Get allele compression metrics.
+
+        Parameters
+        ----------
+        tree_key : str or None
+            Specific tree to get metrics for. If None, returns metrics for all trees.
+
+        Returns
+        -------
+        dict
+            Metrics dictionary. If tree_key is None, returns dict[tree_key] = metrics.
+            If tree_key is specified, returns metrics directly.
+
+        Examples
+        --------
+        all_metrics = lf.get_allele_metrics()
+        sc_metrics = lf.get_allele_metrics('sc')
+        print(f"Compression: {sc_metrics['compression_ratio']:.1f}x")
+        """
+        allele_info = self.uns.get('allele_info', {})
+
+        if tree_key is None:
+            return {k: v.get('metrics', {}) for k, v in allele_info.items()}
+
+        return allele_info.get(tree_key, {}).get('metrics', {})
+
+    def get_cells_by_allele(self, tree_key: str, allele_id: str) -> list[str]:
+        """Get list of cells belonging to an allele.
+
+        Parameters
+        ----------
+        tree_key : str
+            Tree identifier
+        allele_id : str
+            Allele ID (comma-separated character states)
+
+        Returns
+        -------
+        list[str]
+            Cell IDs in this allele
+
+        Examples
+        --------
+        cells = lf.get_cells_by_allele('sc', '1,2,0,3')
+        """
+        allele_info = self.uns.get('allele_info', {}).get(tree_key, {})
+        return allele_info.get('allele_to_cells', {}).get(allele_id, [])
+
+    def color_by_allele_matches(
+        self,
+        matches: dict[str, str],
+        source_tree: str,
+        target_tree: str,
+        color_attr: str = 'color'
+    ) -> None:
+        """Color nodes based on allele matches between trees.
+
+        Takes a matching dictionary and colors both source and target nodes
+        with consistent colors. Uses ColorHash for deterministic coloring.
+
+        Parameters
+        ----------
+        matches : dict[str, str]
+            Mapping from source allele IDs to target allele IDs
+        source_tree : str
+            Source tree key
+        target_tree : str
+            Target tree key
+        color_attr : str
+            Node attribute name for color (default: 'color')
+
+        Examples
+        --------
+        lf.color_by_allele_matches(matches, 'sc', 'sm_0')
+        lf.invalidate_tdata_cache()
+        """
+        from colorhash import ColorHash
+
+        source_graph = self.get_graph(source_tree)
+        target_graph = self.get_graph(target_tree)
+
+        if source_graph is None or target_graph is None:
+            return
+
+        for source_allele, target_allele in matches.items():
+            color = ColorHash(source_allele).hex
+
+            if source_allele in source_graph.nodes:
+                source_graph.nodes[source_allele][color_attr] = color
+
+            if target_allele in target_graph.nodes:
+                target_graph.nodes[target_allele][color_attr] = color
+
+    def get_allele_match_summary(
+        self,
+        matches: dict[str, str],
+        source_tree: str,
+        target_tree: str
+    ) -> dict:
+        """Get summary statistics for allele matches.
+
+        Parameters
+        ----------
+        matches : dict[str, str]
+            Mapping from source to target allele IDs
+        source_tree : str
+            Source tree key
+        target_tree : str
+            Target tree key
+
+        Returns
+        -------
+        dict
+            Summary with total_matches, source_coverage, target_coverage, etc.
+
+        Examples
+        --------
+        summary = lf.get_allele_match_summary(matches, 'sc', 'sm_0')
+        print(f"Matched {summary['total_matches']} alleles")
+        """
+        source_info = self.uns.get('allele_info', {}).get(source_tree, {})
+        target_info = self.uns.get('allele_info', {}).get(target_tree, {})
+
+        source_alleles = set(source_info.get('allele_to_cells', {}).keys())
+        target_alleles = set(target_info.get('allele_to_cells', {}).keys())
+
+        matched_source = set(matches.keys())
+        matched_target = set(matches.values())
+
+        return {
+            'total_matches': len(matches),
+            'source_total': len(source_alleles),
+            'target_total': len(target_alleles),
+            'source_matched': len(matched_source),
+            'target_matched': len(matched_target),
+            'source_coverage': len(matched_source) / len(source_alleles) if source_alleles else 0,
+            'target_coverage': len(matched_target) / len(target_alleles) if target_alleles else 0,
+        }
+
     # I/O
     def save(self, filepath: Path | str) -> None:
         """Save LineageForest."""

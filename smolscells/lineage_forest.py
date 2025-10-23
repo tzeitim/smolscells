@@ -37,12 +37,13 @@ class LineageForest:
     def __repr__(self) -> str:
         has_tdatas = f"  TreeData cache: {len(self._tdata_cache)} ({', '.join(self._tdata_cache.keys())})\n" if self._tdata_cache else ""
         not_collapsed = " not" if not self.is_collapsed else ""
+        is_empty = "empty " if self.shared_tdata is None else self.shared_tdata
 
         return (
             f"LineageForest\n"
             f"  Trees: {len(self.trees)} ({', '.join(self.tree_keys)})\n"
             f"{has_tdatas}"
-            f"  Shared data: {self.shared_tdata is not None}\n"
+            f"  Shared data: {is_empty}\n"
             f"  Is{not_collapsed} collapsed"
         )
 
@@ -463,9 +464,10 @@ class LineageForest:
             cell_to_allele = {}
             allele_sizes = {}
             allele_id_to_hash = {}
+            node_to_allele_id = {}  # Maps node names to allele ID strings
 
             allele_char_states = []
-            allele_ids = []
+            allele_node_names = []  # Use representative cell names as node names
 
             cells_in_groups = set()
             for group_idx, cell_group in enumerate(allele_groups.values()):
@@ -475,16 +477,20 @@ class LineageForest:
                 allele_id = ",".join(str(int(x)) for x in char_state)
                 allele_id_hash = hashlib.md5(allele_id.encode()).hexdigest()[:8]
 
-                allele_to_cells[allele_id] = cells
-                allele_sizes[allele_id] = len(cells)
-                allele_id_to_hash[allele_id] = allele_id_hash
+                # Use first cell as representative node name
+                node_name = cells[0]
+
+                allele_to_cells[node_name] = cells
+                allele_sizes[node_name] = len(cells)
+                allele_id_to_hash[node_name] = allele_id_hash
+                node_to_allele_id[node_name] = allele_id
 
                 for cell in cells:
-                    cell_to_allele[cell] = allele_id
+                    cell_to_allele[cell] = node_name
                     cells_in_groups.add(cell)
 
                 allele_char_states.append(char_state)
-                allele_ids.append(allele_id)
+                allele_node_names.append(node_name)
 
             for cell in char_matrix.index:
                 if cell not in cells_in_groups:
@@ -492,17 +498,20 @@ class LineageForest:
                     allele_id = ",".join(str(int(x)) for x in char_state)
                     allele_id_hash = hashlib.md5(allele_id.encode()).hexdigest()[:8]
 
-                    allele_to_cells[allele_id] = [cell]
-                    allele_sizes[allele_id] = 1
-                    allele_id_to_hash[allele_id] = allele_id_hash
-                    cell_to_allele[cell] = allele_id
+                    node_name = cell
+
+                    allele_to_cells[node_name] = [cell]
+                    allele_sizes[node_name] = 1
+                    allele_id_to_hash[node_name] = allele_id_hash
+                    cell_to_allele[cell] = node_name
+                    node_to_allele_id[node_name] = allele_id
 
                     allele_char_states.append(char_state)
-                    allele_ids.append(allele_id)
+                    allele_node_names.append(node_name)
 
             allele_char_matrix = pd.DataFrame(
                 allele_char_states,
-                index=allele_ids,
+                index=allele_node_names,
                 columns=char_matrix.columns
             )
 
@@ -515,7 +524,7 @@ class LineageForest:
 
             if store_mappings:
                 total_cells = len(char_matrix)
-                total_alleles = len(allele_ids)
+                total_alleles = len(allele_node_names)
                 compression_ratio = total_cells / total_alleles if total_alleles > 0 else 0
 
                 allele_lf.uns['allele_info'][tree_key] = {
@@ -523,6 +532,7 @@ class LineageForest:
                     'cell_to_allele': cell_to_allele,
                     'allele_sizes': allele_sizes,
                     'allele_id_to_hash': allele_id_to_hash,
+                    'node_to_allele_id': node_to_allele_id,  # Map node names to allele ID strings
                     'original_character_matrix': char_matrix,  # Store for self-contained expansion
                     'missing_state_indicator': tree.missing_state_indicator,
                     'metrics': {
@@ -588,6 +598,7 @@ class LineageForest:
             allele_to_cells = allele_info.get('allele_to_cells', {})
             allele_id_to_hash = allele_info.get('allele_id_to_hash', {})
             allele_sizes = allele_info.get('allele_sizes', {})
+            node_to_allele_id = allele_info.get('node_to_allele_id', {})
 
             # Get original character matrix from stored data
             char_matrix = allele_info.get('original_character_matrix')
@@ -605,6 +616,8 @@ class LineageForest:
             for node in allele_graph.nodes():
                 if node in allele_to_cells:
                     cells = allele_to_cells[node]
+                    # Get the allele_id string from stored mapping
+                    allele_id_str = node_to_allele_id.get(node, node)
 
                     parent = list(allele_graph.predecessors(node))
                     if not parent:
@@ -612,7 +625,7 @@ class LineageForest:
                             cell_graph.add_node(cell, **allele_graph.nodes[node])
 
                             if add_metadata:
-                                cell_graph.nodes[cell]['allele_id'] = node
+                                cell_graph.nodes[cell]['allele_id'] = allele_id_str
                                 cell_graph.nodes[cell]['allele_id_hash'] = allele_id_to_hash.get(node)
                                 cell_graph.nodes[cell]['allele_size'] = allele_sizes.get(node, len(cells))
                                 cell_graph.nodes[cell]['allele_siblings'] = [c for c in cells if c != cell]
@@ -626,11 +639,12 @@ class LineageForest:
                             cell_graph.add_edge(parent, cell, **edge_attrs)
 
                             if add_metadata:
-                                cell_graph.nodes[cell]['allele_id'] = node
+                                cell_graph.nodes[cell]['allele_id'] = allele_id_str
                                 cell_graph.nodes[cell]['allele_id_hash'] = allele_id_to_hash.get(node)
                                 cell_graph.nodes[cell]['allele_size'] = allele_sizes.get(node, len(cells))
                                 cell_graph.nodes[cell]['allele_siblings'] = [c for c in cells if c != cell]
                 else:
+                    # Internal node - not an allele leaf, keep as-is
                     cell_graph.add_node(node, **allele_graph.nodes[node])
 
                     for parent in allele_graph.predecessors(node):
@@ -859,7 +873,22 @@ class LineageForest:
                         # Character matrix only has leaves - reindex to match tdata.obs (all nodes)
                         # Missing nodes (internal nodes) will have NaN values
                         char_matrix_aligned = tree.character_matrix.reindex(tdata.obs.index)
-                        tdata.obsm['characters'] = char_matrix_aligned
+
+                        # Convert to strings following pycea convention:
+                        # - Convert numeric values to string ints (e.g., 48 -> '48')
+                        # - 0 (no recorded state) -> '-'
+                        # - NaN (missing data) -> '*'
+                        import numpy as np
+                        char_matrix_str = char_matrix_aligned.copy()
+
+                        # Convert to int then string, using -1 as placeholder for NaN
+                        char_matrix_str = char_matrix_str.fillna(-1).astype(int).astype(str)
+
+                        # Apply pycea conventions
+                        char_matrix_str = char_matrix_str.replace('0', '-')  # no recorded state
+                        char_matrix_str = char_matrix_str.replace('-1', '*')  # missing data
+
+                        tdata.obsm['characters'] = char_matrix_str
 
                     self._tdata_cache[tree_key] = tdata
             except Exception:

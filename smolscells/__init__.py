@@ -1,10 +1,11 @@
 import logging
 
-from . import sim
-#from .lineage_treedata import LineageForest
+from . import io, sim
+from . import tree_node_matching as tnm
+
+# from .lineage_treedata import LineageForest
 from .lineage_forest import LineageForest
 from .sim import SimulatedLineageForest, simulate_lineage_experiment
-from . import tree_node_matching as tnm
 
 __all__ = [
     "LineageForest",
@@ -12,9 +13,9 @@ __all__ = [
     "simulate_lineage_experiment",
     "sim",
     "tnm",
+    "io",
 ]
 # kept here due to some unwanted warnings from login nodes
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )

@@ -19,15 +19,12 @@ from .lineage_forest import LineageForest
 logger = logging.getLogger(__name__)
 
 
-def _require_fracture_read_file():
-    """Lazy import of fracture's read_file from ogtk."""
-    try:
-        from ogtk.ltr.fracture.pipeline.formats import read_file
-    except ImportError as e:
-        raise ImportError(
-            "ogtk is required for reading allele table files. Install it from: ~/src/ogtk"
-        ) from e
-    return read_file
+def read_file(path: Path | str) -> pl.DataFrame:
+    """Read an allele table from parquet or arrow format."""
+    path_str = str(path)
+    if path_str.endswith(".arrow"):
+        return pl.read_ipc(path_str)
+    return pl.read_parquet(path_str)
 
 
 def collapse_umis_to_cells(
@@ -270,8 +267,6 @@ def from_allele_table(
     -------
     LineageForest
     """
-    read_file = _require_fracture_read_file()
-
     allele_df = read_file(path)
     logger.info(f"Read allele table: {allele_df.shape[0]} rows, {allele_df.shape[1]} columns")
 

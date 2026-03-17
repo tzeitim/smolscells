@@ -1,10 +1,14 @@
 """  New class
 """
+from __future__ import annotations
+
 from cassiopeia.data import CassiopeiaTree
 from treedata import TreeData
 import networkx as nx
 
 from pathlib import Path
+from typing import Tuple
+
 
 class LineageForest:
     """
@@ -33,6 +37,9 @@ class LineageForest:
         self.shared_tdata = shared_tdata  # Shared data across all observations
         self._sm_counter = 0 # auto-increment counter for sm trees
         self.is_collapsed = None
+        self.char_color_dict = None      
+        self.node_hex_palette = None    
+
 
     def __repr__(self) -> str:
         has_tdatas = f"  TreeData cache: {len(self._tdata_cache)} ({', '.join(self._tdata_cache.keys())})\n" if self._tdata_cache else ""
@@ -902,3 +909,126 @@ class LineageForest:
         """Remove TreeData from cache."""
         if tree_key in self._tdata_cache:
             del self._tdata_cache[tree_key]
+
+    def _get_char_color_dict(self) -> dict:
+        """Get or create color dictionary for character states.
+
+        Returns dict mapping character values to hex colors.
+        Uses ColorHash for consistent colors, with pycea conventions for '-' and '*'.
+        """
+        if self.char_color_dict is None:
+            from colorhash import ColorHash
+
+            char_color_dict = {str(v):ColorHash(v).hex
+                 for v in
+                 set().union(*[
+                     set(i.character_matrix.to_numpy().flatten())
+                         for i in
+                         self.trees_values])
+            }
+            # Add pycea convention colors for special characters
+            char_color_dict["-"] = "white"      # no recorded state (0)
+            char_color_dict["*"] = "lightgrey"  # missing data (NaN)
+            self.char_color_dict = char_color_dict
+        else:
+            char_color_dict = self.char_color_dict
+
+        return char_color_dict
+
+    def _get_node_hex_palette(self) -> dict:
+        """Get or create palette of node colors from all trees.
+
+        Returns dict mapping hex colors to themselves (for pycea palette format).
+        """
+        if self.node_hex_palette is None:
+            hex_palette = {}
+
+            for tree_key in self.tree_keys:
+                graph =self.get_graph(tree_key)
+                for node in graph.nodes:
+                    hex_color = graph.nodes[node].get('color', '#ffffff00')
+                    hex_palette[hex_color] = hex_color
+            self.node_hex_palette = hex_palette
+        else:
+            hex_palette = self.node_hex_palette
+
+        return hex_palette
+
+    ## plotting
+    def plot_all_trees(self,
+                       node_size: int = 70,
+                       show_labels: bool = True,
+                       plot_ann: bool = True,
+                       viz_conf: dict | None = None,
+                       figsize: Tuple[int, int] | None = None,
+                       )->Figure:
+        """Plot all trees side-by-side with optional character annotations.
+
+        Parameters
+        ----------
+        node_size : int
+            Size of node markers (default: 70)
+        show_labels : bool
+            Whether to show node labels (default: True)
+        plot_ann : bool
+            Whether to show character annotations (default: True)
+        viz_conf : dict | None
+            Visualization config for annotations (default: gap=0.4, width=0.06, border_width=0.002)
+        figsize : Tuple[int, int] | None
+            Figure size as (width, height). If None, uses matplotlib default.
+
+        Returns
+        -------
+        Figure
+            Matplotlib figure object
+
+        Raises
+        ------
+        ValueError
+            If no trees are available to plot
+        """
+        import pycea as py
+        import matplotlib.pyplot as plt
+
+        tdnames = sorted(self.tdatas.keys())
+        if not tdnames:
+            raise ValueError("No trees available to plot")
+        char_color_dict = self._get_char_color_dict()
+        hex_palette = self._get_node_hex_palette()
+        if viz_conf is None:
+            viz_conf = {"gap":0.4, "width":0.06, "border_width":0.002}
+
+        fig, axes = plt.subplots(1, len(tdnames), figsize=figsize)
+
+        if len(tdnames) == 1:
+            axes = [axes]
+
+        for tdn, ax in zip(tdnames, axes):
+            tdata = self.get_tdata(tdn)
+            ax.set_title(tdn) 
+            py.pl.branches(tdata, tree="tree", ax=ax)
+            py.pl.nodes(tdata, 
+                        color="color",
+                        slot="obst",
+                        tree="tree",
+                        nodes='all',
+                        size=node_size,
+                        legend=False,
+                        ax=ax,
+                        palette=hex_palette)
+
+            if plot_ann:
+                py.pl.annotation(tdata,
+                                 keys='characters',
+                                 ax=ax,
+                                 legend=False,
+                                 palette=char_color_dict,
+                                 **viz_conf)
+
+            if show_labels and hasattr(ax, '_attrs') and 'node_coords' in ax._attrs:
+                node_coords = ax._attrs["node_coords"]
+                for (tree_key, node_name), (x, y) in node_coords.items():
+                    label = str(node_name).replace('cassiopeia_internal_node', '')[:5]
+                    ax.text(x * 1.1, y, label, fontsize=8, ha='left', va='center')
+
+        return fig    

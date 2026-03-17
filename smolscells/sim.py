@@ -43,7 +43,6 @@ def _state_generating_distribution():
     """Default state generating distribution for experimental simulation."""
     return np.random.exponential(1e-5)
 
-
 def return_default_conf_gt(random_seed:int|None=None):
     """Return default ground truth simulation configuration."""
     if random_seed is None:
@@ -60,7 +59,9 @@ def return_default_conf_gt(random_seed:int|None=None):
 
 
 def return_default_conf_exp(missing_data=False):
-    """Return default experimental recording configuration."""
+    """Return default experimental recording configuration.
+        This is fed to Cas9LineageTracingDataSimulator
+    """
     return {
         "number_of_cassettes": 4,
         "size_of_cassette": 10,
